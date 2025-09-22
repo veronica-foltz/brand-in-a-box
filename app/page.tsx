@@ -12,11 +12,11 @@ type GenResult = {
     shortDescription?: string;
     hashtags?: string[];
   };
-  imageDataUrl?: string | null;
-  photoUrl?: string | null;
+  imageDataUrl?: string | null; // PNG data URL (OpenAI)
+  photoUrls?: string[];         // NEW: multiple Pexels candidates
   message?: string;
   error?: string;
-  rawModelText?: string; // for debugging
+  rawModelText?: string;        // debug
 };
 
 function placeholderSvgDataUrl(product: string) {
@@ -39,8 +39,21 @@ function placeholderSvgDataUrl(product: string) {
   return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
 }
 
+const CATEGORIES = [
+  "Beverage",
+  "Skincare",
+  "Apparel",
+  "Gadget",
+  "Pet",
+  "Home",
+  "Food",
+  "Other",
+];
+
 export default function Home() {
   const [product, setProduct] = useState("");
+  const [category, setCategory] = useState<string>("Other");         // NEW
+  const [keyBenefit, setKeyBenefit] = useState<string>("");          // NEW
   const [audience, setAudience] = useState("");
   const [tone, setTone] = useState("friendly");
   const [platform, setPlatform] = useState("Instagram");
@@ -52,12 +65,14 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<GenResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedImage, setSelectedImage] = useState<string | null>(null); // NEW
 
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
     setResult(null);
+    setSelectedImage(null);
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -65,6 +80,8 @@ export default function Home() {
         cache: "no-store",
         body: JSON.stringify({
           product,
+          category,
+          keyBenefit,
           audience,
           tone,
           platform,
@@ -89,29 +106,39 @@ export default function Home() {
     alert("Copied!");
   }
 
+  // Build image choices
   const fallbacks = useMemo(() => {
     const topic = encodeURIComponent(product || "product");
-    const tags = encodeURIComponent((product || "product").replace(/\s+/g, ","));
-    return [
-      result?.provider === "openai" && result?.imageDataUrl ? result.imageDataUrl : null,
-      result?.photoUrl || null,
+    const base = placeholderSvgDataUrl(product);
+    const candidates: string[] = [];
+
+    // Preferred order:
+    if (selectedImage) candidates.push(selectedImage);
+    if (result?.imageDataUrl) candidates.push(result.imageDataUrl);
+    if (result?.photoUrls && result.photoUrls.length) candidates.push(...result.photoUrls);
+    // Final fallbacks:
+    candidates.push(
       `https://source.unsplash.com/1024x1024/?${topic}`,
-      `https://loremflickr.com/1024/1024/${tags}`,
       `https://picsum.photos/seed/${topic}/1024/1024`,
-      placeholderSvgDataUrl(product),
-    ].filter(Boolean) as string[];
-  }, [result, product]);
+      base
+    );
+
+    // Dedup
+    return Array.from(new Set(candidates));
+  }, [result, product, selectedImage]);
 
   const [imgIndex, setImgIndex] = useState(0);
-  useEffect(() => setImgIndex(0), [fallbacks.length, product, result?.provider]);
+  useEffect(() => setImgIndex(0), [fallbacks.length, product, result?.provider, selectedImage]);
   const posterSrc = fallbacks[imgIndex] || placeholderSvgDataUrl(product);
   const handleImgError = () => setImgIndex((i) => Math.min(i + 1, fallbacks.length - 1));
+
+  const needKeywordsHint = includeImage && !imageQuery && !(result?.photoUrls?.length);
 
   return (
     <main className="min-h-screen p-6 flex flex-col items-center bg-gray-50 text-gray-900">
       <div className="w-full max-w-3xl space-y-4">
         <h1 className="text-3xl font-bold">Brand-in-a-Box</h1>
-        <p className="text-gray-900">Type your product, get copy + a poster.</p>
+        <p className="text-gray-900">Type your product, choose a category & benefit, get tailored copy + a poster.</p>
 
         <form onSubmit={handleGenerate} className="grid gap-3 bg-white p-4 rounded-xl shadow">
           <input
@@ -121,12 +148,32 @@ export default function Home() {
             onChange={(e) => setProduct(e.target.value)}
             required
           />
+
+          <div className="grid grid-cols-2 gap-2">
+            <select
+              className="border p-2 rounded text-gray-900"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+            <input
+              className="border p-2 rounded text-gray-900 placeholder:text-gray-700"
+              placeholder="Key benefit (e.g., smoother skin)"
+              value={keyBenefit}
+              onChange={(e) => setKeyBenefit(e.target.value)}
+            />
+          </div>
+
           <input
             className="border p-2 rounded text-gray-900 placeholder:text-gray-700"
             placeholder="Audience (optional)"
             value={audience}
             onChange={(e) => setAudience(e.target.value)}
           />
+
           <div className="grid grid-cols-2 gap-2">
             <input
               className="border p-2 rounded text-gray-900 placeholder:text-gray-700"
@@ -141,6 +188,7 @@ export default function Home() {
               onChange={(e) => setPlatform(e.target.value)}
             />
           </div>
+
           <div className="grid grid-cols-2 gap-2">
             <input
               className="border p-2 rounded text-gray-900 placeholder:text-gray-700"
@@ -164,12 +212,20 @@ export default function Home() {
             />
             Include poster image
           </label>
+
           <input
             className="border p-2 rounded text-gray-900 placeholder:text-gray-700"
-            placeholder="Image keywords (optional, e.g., 'grain-free dog food, kibble, bowl')"
+            placeholder="Image keywords (e.g., 'iced coffee, glass, cold brew' or 'dog bowl kibble')"
             value={imageQuery}
             onChange={(e) => setImageQuery(e.target.value)}
           />
+
+          {needKeywordsHint && (
+            <p className="text-sm text-amber-700 bg-amber-100 border border-amber-200 p-2 rounded">
+              Tip: add a few image keywords so results match your product (e.g., “granola bar, oats, wrapper”).
+              You can also set a free <strong>PEXELS_API_KEY</strong> later for better images.
+            </p>
+          )}
 
           <button disabled={loading} className="bg-black text-white rounded p-2">
             {loading ? "Making magic…" : "Generate"}
@@ -229,7 +285,6 @@ export default function Home() {
                 <p>{(result.copy?.hashtags || []).join(" ")}</p>
               </div>
 
-              {/* Debug block */}
               {result.rawModelText ? (
                 <details className="mt-3">
                   <summary className="cursor-pointer text-sm text-gray-600">Debug: raw model output</summary>
@@ -243,6 +298,24 @@ export default function Home() {
             {includeImage && (
               <div className="bg-white p-4 rounded-xl shadow">
                 <h2 className="font-semibold text-xl mb-2 text-gray-900">Poster Image</h2>
+
+                {/* Candidate picker */}
+                {result?.photoUrls && result.photoUrls.length > 0 && (
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    {result.photoUrls.map((u) => (
+                      <button
+                        type="button"
+                        key={u}
+                        onClick={() => setSelectedImage(u)}
+                        className={`relative h-28 border rounded overflow-hidden ${selectedImage === u ? "ring-2 ring-black" : ""}`}
+                        title="Use this image"
+                      >
+                        <Image src={u} alt="candidate" fill sizes="140px" className="object-cover" unoptimized />
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 <div className="relative w-full h-[512px]">
                   <Image
                     src={posterSrc}
@@ -263,7 +336,7 @@ export default function Home() {
         )}
 
         <footer className="text-xs text-gray-500 pt-4">
-          © {new Date().getFullYear()} Your Name
+          © {new Date().getFullYear()} Veronica Foltz
         </footer>
       </div>
     </main>

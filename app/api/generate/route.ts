@@ -6,9 +6,11 @@ export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-/* ------------ types ------------ */
+/* ------------ request & data types ------------ */
 type GenReq = {
   product: string;
+  category?: string;     // e.g., "Beverage", "Skincare"
+  keyBenefit?: string;   // e.g., "smoother skin"
   audience?: string;
   tone?: string;
   platform?: string;
@@ -38,10 +40,23 @@ const PROVIDER = process.env.AI_PROVIDER || (HAS_OPENAI ? "openai" : "ollama");
 const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:1b";
 const PEXELS_KEY = process.env.PEXELS_API_KEY || "";
-const GROQ_MODEL = process.env.GROQ_MODEL || "mixtral-8x7b-32768"; // <- robust JSON output
+const GROQ_MODEL = process.env.GROQ_MODEL || "mixtral-8x7b-32768";
 const isVercel = process.env.VERCEL === "1";
 
-/* ------------ helpers: copy + svg ------------ */
+/* ------------ helpers: category tag ------------ */
+const categoryTag = (cat?: string) => {
+  const c = (cat || "").toLowerCase();
+  if (c.includes("beverage") || c.includes("drink") || c.includes("coffee")) return "#beverage";
+  if (c.includes("skincare") || c.includes("skin") || c.includes("beauty")) return "#skincare";
+  if (c.includes("apparel") || c.includes("fashion") || c.includes("clothing")) return "#apparel";
+  if (c.includes("gadget") || c.includes("tech") || c.includes("device")) return "#gadget";
+  if (c.includes("pet")) return "#pet";
+  if (c.includes("home")) return "#home";
+  if (c.includes("food")) return "#food";
+  return "#brand";
+};
+
+/* ------------ helpers: fallback copy + svg ------------ */
 const MOCK_COPY = (product: string): StrictCopy => ({
   tagline: `Meet ${product}`,
   caption: `Say hello to ${product}! Fresh look, easy choice.`,
@@ -145,7 +160,25 @@ function coerceCopy(input: unknown, product: string): StrictCopy {
   return fallback;
 }
 
-/* ---- variety fallback so every product differs even if model returns {} ---- */
+/* ---- enforce alignment ---- */
+function ensureProductInTagline(copy: StrictCopy, product: string): StrictCopy {
+  const productWord = (product.split(/\s+/)[0] || "").trim();
+  if (productWord && !copy.tagline.toLowerCase().includes(productWord.toLowerCase())) {
+    copy.tagline = `${productWord}: ${copy.tagline}`;
+  }
+  return copy;
+}
+function ensureHashtags(copy: StrictCopy, product: string, cat?: string): StrictCopy {
+  const firstTag = product.split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, "");
+  const catTag = categoryTag(cat);
+  const set = new Set<string>(copy.hashtags.map((h) => (h.startsWith("#") ? h : `#${h}`)));
+  set.add(`#${firstTag}`);
+  set.add(catTag);
+  copy.hashtags = Array.from(set).slice(0, 5);
+  return copy;
+}
+
+/* ---- variety fallback so repeated generic text never shows ---- */
 function varietyFallback(product: string): StrictCopy {
   const adjectives = [
     "fresh", "clever", "bold", "premium", "eco", "weekend-ready",
@@ -156,130 +189,164 @@ function varietyFallback(product: string): StrictCopy {
   const vb  = verbs[Math.floor(Math.random() * verbs.length)];
   const firstTag = product.split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, "");
 
-  const tagline = `${adj[0].toUpperCase() + adj.slice(1)} ${product}`.slice(0, 40);
+  const tagline = `${product}: ${adj} vibes`.slice(0, 48);
   const caption = `${vb} ${product} — ${adj} and made for you.`.slice(0, 140);
   const shortDescription = `${product} brings ${adj} quality with every use. Built to impress, easy to love.`;
   const hashtags = ["#new", "#trending", "#musthave", `#${firstTag}`, "#daily"];
   return { tagline, caption, shortDescription, hashtags };
 }
 
-/* ------------ helpers: prompts + images ------------ */
-function makeCopyPrompt(product: string, audience?: string, tone?: string, platform?: string) {
+/* ------------ prompts + images ------------ */
+function makeCopyPrompt(
+  product: string,
+  category?: string,
+  keyBenefit?: string,
+  audience?: string,
+  tone?: string,
+  platform?: string
+) {
   return `
-You are a marketing writer. Respond ONLY with a JSON object — no code fences, no markdown.
-JSON schema:
+You are a precise marketing writer. Use ONLY the info provided; do NOT invent ingredients, specs, materials, numbers, or health claims. Keep it truthful and generic if unsure.
+
+Return ONLY a JSON object (no markdown). Schema:
 {
-  "tagline": string,         // <= 8 words, catchy
-  "caption": string,         // <= 140 chars
-  "shortDescription": string,// <= 3 sentences
-  "hashtags": string[]       // 5 short tags, no spaces inside tags
+  "tagline": string,          // <= 8 words, must reference the product or category
+  "caption": string,          // <= 140 chars, 1 sentence
+  "shortDescription": string, // <= 3 short sentences, no invented facts
+  "hashtags": string[]        // 5 tags, short; include a product & category-related tag if possible
 }
 
-Product: ${product}
-Audience: ${audience || "general consumers"}
-Tone: ${tone || "friendly"}
-Platform: ${platform || "Instagram"}
+Inputs:
+- product: ${product}
+- category: ${category || "unspecified"}
+- key benefit: ${keyBenefit || "unspecified"}
+- audience: ${audience || "general consumers"}
+- tone: ${tone || "friendly"}
+- platform: ${platform || "Instagram"}
+
+Constraints:
+- Mention the product or its category in the tagline.
+- Avoid specifics not provided (no ingredients, no tech specs, no medical claims).
+- Hashtags: short, lowercase, no spaces; 5 total.
 `.trim();
 }
 
-function buildPhotoQuery(
+function buildImageQueries(
   product: string,
+  category?: string,
   imageStyle?: string,
   colorHint?: string,
   imageQuery?: string
 ) {
-  const q = imageQuery?.trim();
-  if (q) return q;
-  return [product, imageStyle, colorHint].filter(Boolean).join(" ").trim();
+  const qUser = (imageQuery || "").trim();
+  const base = [product, category, imageStyle, colorHint].filter(Boolean).join(" ").trim();
+  const queries = [
+    qUser || base,
+    [product, category, "product photo", imageStyle].filter(Boolean).join(" "),
+    [product, category, "studio", "minimal"].filter(Boolean).join(" "),
+  ].filter(Boolean) as string[];
+  return Array.from(new Set(queries));
 }
 
-async function getPexelsPhotoUrl(query: string): Promise<string | null> {
-  if (!PEXELS_KEY) return null;
+async function getPexelsPhotos(query: string, n: number): Promise<string[]> {
+  if (!PEXELS_KEY) return [];
   try {
-    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(
-      query
-    )}&per_page=1&orientation=square`;
+    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${Math.min(
+      Math.max(n, 1),
+      12
+    )}&orientation=square`;
     const res = await fetch(url, { headers: { Authorization: PEXELS_KEY }, cache: "no-store" });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
     const j = (await res.json()) as PexelsSearch;
-    const p = j.photos?.[0];
-    return p?.src?.large2x || p?.src?.large || p?.src?.medium || null;
+    const photos = j.photos || [];
+    const urls = photos
+      .map((p) => p?.src?.large2x || p?.src?.large || p?.src?.medium)
+      .filter((u): u is string => !!u);
+    return urls;
   } catch {
-    return null;
+    return [];
   }
 }
 
-/* ------------ GROQ multi-try helper ------------ */
-async function groqTry(product: string, audience?: string, tone?: string, platform?: string) {
+/* ------------ GROQ multi-try (consistent shape) ------------ */
+type GroqMsg = { role: "system" | "user" | "assistant"; content: string };
+
+async function groqTry(
+  product: string,
+  category?: string,
+  keyBenefit?: string,
+  audience?: string,
+  tone?: string,
+  platform?: string
+) {
   const key = process.env.GROQ_API_KEY!;
   const url = "https://api.groq.com/openai/v1/chat/completions";
 
-  // Attempt 1 — normal JSON prompt
-  const m1 = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      temperature: 0.85,
-      messages: [
-        { role: "system", content: "Return ONLY a JSON object. No code fences, no markdown." },
-        { role: "user", content: makeCopyPrompt(product, audience, tone, platform) },
-      ],
-    }),
-    cache: "no-store",
-  }).then(r => r.json() as Promise<GroqChatResponse>).catch(() => ({} as GroqChatResponse));
-  let raw = m1?.choices?.[0]?.message?.content || "";
+  const prompts: { temperature: number; fewshot: boolean; lines: boolean }[] = [
+    { temperature: 0.8,  fewshot: false, lines: false },
+    { temperature: 0.9,  fewshot: true,  lines: false },
+    { temperature: 0.95, fewshot: false, lines: true  },
+  ];
 
-  // Attempt 2 — stricter + few-shot if empty or {}
-  if (!raw || raw.trim() === "{}") {
-    const m2 = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0.9,
-        messages: [
-          { role: "system", content: "You are a strict JSON generator. Output ONE JSON object ONLY." },
-          {
-            role: "user",
-            content:
-              `Return EXACTLY this structure: {"tagline":"..","caption":"..","shortDescription":"..","hashtags":["#a","#b","#c","#d","#e"]}\n` +
-              `Product: ${product}\nAudience: ${audience || "general consumers"}\nTone: ${tone || "friendly"}\nPlatform: ${platform || "Instagram"}`,
-          },
-          {
-            role: "assistant",
-            content:
-              `{"tagline":"Bold mornings","caption":"Wake up right.","shortDescription":"A rich blend for everyday energy.","hashtags":["#coffee","#morning","#energy","#daily","#love"]}`,
-          },
-          { role: "user", content: "Now do the product above. JSON only." },
-        ],
-      }),
-      cache: "no-store",
-    }).then(r => r.json() as Promise<GroqChatResponse>).catch(() => ({} as GroqChatResponse));
-    raw = m2?.choices?.[0]?.message?.content || raw;
-  }
+  let raw = "";
 
-  // Attempt 3 — key/value lines (we’ll parse)
-  if (!raw || raw.trim() === "{}") {
-    const m3 = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0.9,
-        messages: [
-          { role: "system", content: "Return ONLY plain text with these keys, no extra text." },
-          {
-            role: "user",
-            content:
-              `Tagline: ...\nCaption: ...\nShort Description: ...\nHashtags: #a #b #c #d #e\n\n` +
-              `Product: ${product}\nAudience: ${audience || "general consumers"}\nTone: ${tone || "friendly"}\nPlatform: ${platform || "Instagram"}`,
-          },
-        ],
-      }),
-      cache: "no-store",
-    }).then(r => r.json() as Promise<GroqChatResponse>).catch(() => ({} as GroqChatResponse));
-    raw = m3?.choices?.[0]?.message?.content || raw;
+  for (const p of prompts) {
+    const messages: GroqMsg[] = [];
+
+    if (!p.lines) {
+      messages.push({
+        role: "system",
+        content: "Return ONLY a JSON object. No code fences, no markdown."
+      });
+      messages.push({
+        role: "user",
+        content: makeCopyPrompt(product, category, keyBenefit, audience, tone, platform)
+      });
+      if (p.fewshot) {
+        messages.push({
+          role: "assistant",
+          content:
+            `{"tagline":"Bold mornings","caption":"Wake up right.","shortDescription":"A rich blend for everyday energy.","hashtags":["#coffee","#morning","#energy","#daily","#love"]}`
+        });
+        messages.push({ role: "user", content: "Now do the product above. JSON only." });
+      }
+    } else {
+      messages.push({
+        role: "system",
+        content: "Return ONLY plain text lines with these keys, no extra text."
+      });
+      messages.push({
+        role: "user",
+        content:
+          `Tagline: ...\nCaption: ...\nShort Description: ...\nHashtags: #a #b #c #d #e\n\n` +
+          `product: ${product}\ncategory: ${category || "unspecified"}\nbenefit: ${keyBenefit || "unspecified"}\n` +
+          `audience: ${audience || "general"}\ntone: ${tone || "friendly"}\nplatform: ${platform || "Instagram"}`
+      });
+    }
+
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`
+        },
+        body: JSON.stringify({
+          model: GROQ_MODEL,
+          temperature: p.temperature,
+          messages
+        }),
+        cache: "no-store"
+      });
+      const j = (await r.json()) as GroqChatResponse;
+      const candidate = j?.choices?.[0]?.message?.content?.trim() ?? "";
+      if (candidate && candidate !== "{}") {
+        raw = candidate;
+        break;
+      }
+    } catch {
+      // try next pattern
+    }
   }
 
   return raw || "";
@@ -291,6 +358,8 @@ export async function POST(req: Request) {
     const body = (await req.json()) as GenReq;
     const {
       product,
+      category,
+      keyBenefit,
       audience,
       tone,
       platform,
@@ -301,7 +370,7 @@ export async function POST(req: Request) {
     } = body || {};
     if (!product) return NextResponse.json({ error: "Missing product" }, { status: 400 });
 
-    const photoQuery = buildPhotoQuery(product, imageStyle, colorHint, imageQuery);
+    const imgQueries = buildImageQueries(product, category, imageStyle, colorHint, imageQuery);
 
     /* ---- 1) OpenAI (cloud) ---- */
     if (HAS_OPENAI) {
@@ -309,17 +378,19 @@ export async function POST(req: Request) {
       try {
         const copyRes = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          temperature: 0.9,
+          temperature: 0.85,
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: "Return only valid JSON, no markdown or code fences." },
-            { role: "user", content: makeCopyPrompt(product, audience, tone, platform) },
+            { role: "user", content: makeCopyPrompt(product, category, keyBenefit, audience, tone, platform) },
           ],
         });
 
         const raw = copyRes.choices?.[0]?.message?.content || "{}";
         const parsed = extractJsonFromText(raw) ?? raw;
-        const copy = coerceCopy(parsed, product);
+        let copy = coerceCopy(parsed, product);
+        copy = ensureProductInTagline(copy, product);
+        copy = ensureHashtags(copy, product, category);
 
         let imageDataUrl: string | null = null;
         if (includeImage !== false) {
@@ -328,6 +399,7 @@ export async function POST(req: Request) {
               model: "gpt-image-1",
               prompt: `
 Marketing poster for: ${product}.
+Category: ${category || "unspecified"}; Benefit: ${keyBenefit || "unspecified"}.
 Style: ${imageStyle || "clean, modern, minimal"}; Colors: ${colorHint || "brand neutral"}.
 No text; product-centric; soft lighting; centered composition.
 `,
@@ -337,47 +409,60 @@ No text; product-centric; soft lighting; centered composition.
             const b64 = img.data?.[0]?.b64_json;
             if (b64) imageDataUrl = `data:image/png;base64,${b64}`;
           } catch {
-            // use stock
+            // fall back to stock
           }
         }
-        const photoUrl = imageDataUrl || includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+
+        // multiple Pexels options
+        let photoUrls: string[] = [];
+        if (includeImage !== false) {
+          for (const q of imgQueries) {
+            const urls = await getPexelsPhotos(q, 6);
+            photoUrls = photoUrls.concat(urls);
+            if (photoUrls.length >= 6) break;
+          }
+          photoUrls = Array.from(new Set(photoUrls)).slice(0, 6);
+        }
 
         return NextResponse.json(
-          { provider: "openai", demo: false, copy, imageDataUrl, photoUrl, rawModelText: raw },
+          { provider: "openai", demo: false, copy, imageDataUrl, photoUrls, rawModelText: raw },
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
-        // fall through
+        // fall through to Groq
       }
     }
 
-    /* ---- 1.5) Groq (cloud, free text) ---- */
+    /* ---- 1.5) Groq (cloud) ---- */
     if (HAS_GROQ) {
       try {
-        const raw = await groqTry(product, audience, tone, platform);
+        const raw = await groqTry(product, category, keyBenefit, audience, tone, platform);
         const parsed = extractJsonFromText(raw) ?? parseKeyedLines(raw) ?? raw;
-        const copy = coerceCopy(parsed, product);
+        let copy = coerceCopy(parsed, product);
 
-        // If parser yielded the generic template, force variety
-        if (
-          copy.tagline.startsWith(`Meet ${product}`) &&
-          copy.caption.startsWith(`Say hello to ${product}`)
-        ) {
-          const alt = varietyFallback(product);
-          copy.tagline = alt.tagline;
-          copy.caption = alt.caption;
-          copy.shortDescription = alt.shortDescription;
-          copy.hashtags = alt.hashtags;
+        if (copy.tagline.startsWith(`Meet ${product}`) && copy.caption.startsWith(`Say hello to ${product}`)) {
+          copy = varietyFallback(product);
         }
 
-        const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+        copy = ensureProductInTagline(copy, product);
+        copy = ensureHashtags(copy, product, category);
+
+        let photoUrls: string[] = [];
+        if (includeImage !== false) {
+          for (const q of imgQueries) {
+            const urls = await getPexelsPhotos(q, 6);
+            photoUrls = photoUrls.concat(urls);
+            if (photoUrls.length >= 6) break;
+          }
+          photoUrls = Array.from(new Set(photoUrls)).slice(0, 6);
+        }
 
         return NextResponse.json(
-          { provider: "groq", demo: false, copy, imageDataUrl: null, photoUrl, rawModelText: raw },
+          { provider: "groq", demo: false, copy, imageDataUrl: null, photoUrls, rawModelText: raw },
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
-        // continue
+        // continue to Ollama or demo
       }
     }
 
@@ -389,7 +474,7 @@ No text; product-centric; soft lighting; centered composition.
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: OLLAMA_MODEL,
-            prompt: makeCopyPrompt(product, audience, tone, platform),
+            prompt: makeCopyPrompt(product, category, keyBenefit, audience, tone, platform),
             stream: false,
             options: { num_ctx: 512, num_predict: 256 },
           }),
@@ -404,7 +489,7 @@ No text; product-centric; soft lighting; centered composition.
               demo: true,
               copy: MOCK_COPY(product),
               imageDataUrl: svg,
-              photoUrl: null,
+              photoUrls: [],
               message: "Ollama not ready or model too large. Try llama3.2:1b / phi3:mini.",
             },
             { headers: { "Cache-Control": "no-store" } }
@@ -413,28 +498,47 @@ No text; product-centric; soft lighting; centered composition.
 
         const j = (await res.json()) as { response?: string };
         const parsed = extractJsonFromText(j.response ?? "") ?? parseKeyedLines(j.response ?? "") ?? j.response ?? "";
-        const copy = coerceCopy(parsed, product);
-        const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+        let copy = coerceCopy(parsed, product);
+        copy = ensureProductInTagline(copy, product);
+        copy = ensureHashtags(copy, product, category);
+
+        let photoUrls: string[] = [];
+        if (includeImage !== false) {
+          for (const q of imgQueries) {
+            const urls = await getPexelsPhotos(q, 6);
+            photoUrls = photoUrls.concat(urls);
+            if (photoUrls.length >= 6) break;
+          }
+          photoUrls = Array.from(new Set(photoUrls)).slice(0, 6);
+        }
 
         return NextResponse.json(
-          { provider: "ollama", demo: false, copy, imageDataUrl: null, photoUrl, rawModelText: j.response ?? "" },
+          { provider: "ollama", demo: false, copy, imageDataUrl: null, photoUrls, rawModelText: j.response ?? "" },
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
-        // fall through
+        // fall through to demo
       }
     }
 
     /* ---- 3) Demo fallback ---- */
     const svg = toDataUrlSvg(MOCK_SVG(product));
-    const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+    let photoUrls: string[] = [];
+    if (imageQuery || PEXELS_KEY) {
+      for (const q of imgQueries) {
+        const urls = await getPexelsPhotos(q, 6);
+        photoUrls = photoUrls.concat(urls);
+        if (photoUrls.length >= 6) break;
+      }
+      photoUrls = Array.from(new Set(photoUrls)).slice(0, 6);
+    }
     return NextResponse.json(
       {
         provider: "demo",
         demo: true,
         copy: MOCK_COPY(product),
         imageDataUrl: svg,
-        photoUrl,
+        photoUrls,
         message: isVercel
           ? "No cloud key configured and Ollama is not reachable in production. Serving demo output."
           : "AI not available. Serving demo output.",
