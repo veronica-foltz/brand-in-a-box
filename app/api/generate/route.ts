@@ -43,20 +43,26 @@ const PEXELS_KEY = process.env.PEXELS_API_KEY || "";
 const GROQ_MODEL = process.env.GROQ_MODEL || "mixtral-8x7b-32768";
 const isVercel = process.env.VERCEL === "1";
 
-/* ------------ helpers: category tag ------------ */
+/* ------------ small utils ------------ */
+const clampWords = (s: string, maxWords: number) =>
+  s.split(/\s+/).slice(0, maxWords).join(" ").trim();
+
+const firstWordTag = (s: string) =>
+  s.split(/\s+/)[0]?.toLowerCase().replace(/[^a-z0-9]/g, "") || "brand";
+
 const categoryTag = (cat?: string) => {
   const c = (cat || "").toLowerCase();
-  if (c.includes("beverage") || c.includes("drink") || c.includes("coffee")) return "#beverage";
-  if (c.includes("skincare") || c.includes("skin") || c.includes("beauty")) return "#skincare";
-  if (c.includes("apparel") || c.includes("fashion") || c.includes("clothing")) return "#apparel";
-  if (c.includes("gadget") || c.includes("tech") || c.includes("device")) return "#gadget";
-  if (c.includes("pet")) return "#pet";
-  if (c.includes("home")) return "#home";
-  if (c.includes("food")) return "#food";
+  if (/(beverage|drink|coffee|tea|brew)/.test(c)) return "#beverage";
+  if (/(skincare|skin|beauty|serum|cream)/.test(c)) return "#skincare";
+  if (/(apparel|fashion|clothing|wear)/.test(c)) return "#apparel";
+  if (/(gadget|tech|device|electronics)/.test(c)) return "#gadget";
+  if (/pet/.test(c)) return "#pet";
+  if (/home/.test(c)) return "#home";
+  if (/food|snack|granola|protein/.test(c)) return "#food";
   return "#brand";
 };
 
-/* ------------ helpers: fallback copy + svg ------------ */
+/* ------------ fallback copy + svg ------------ */
 const MOCK_COPY = (product: string): StrictCopy => ({
   tagline: `Meet ${product}`,
   caption: `Say hello to ${product}! Fresh look, easy choice.`,
@@ -81,7 +87,7 @@ const MOCK_SVG = (product: string) => {
 const toDataUrlSvg = (svg: string) =>
   `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 
-/* ------------ helpers: parsing ------------ */
+/* ------------ parsing helpers ------------ */
 function extractJsonFromText(text: string): unknown | null {
   if (!text) return null;
   const cleaned = text.replace(/```(?:json)?|```/g, "").trim();
@@ -160,16 +166,16 @@ function coerceCopy(input: unknown, product: string): StrictCopy {
   return fallback;
 }
 
-/* ---- enforce alignment ---- */
+/* ------------ “good enough?” checks & enforcement ------------ */
 function ensureProductInTagline(copy: StrictCopy, product: string): StrictCopy {
-  const productWord = (product.split(/\s+/)[0] || "").trim();
-  if (productWord && !copy.tagline.toLowerCase().includes(productWord.toLowerCase())) {
-    copy.tagline = `${productWord}: ${copy.tagline}`;
+  const p = product.trim();
+  if (p && !copy.tagline.toLowerCase().includes(p.toLowerCase())) {
+    copy.tagline = `${clampWords(p, 3)}: ${copy.tagline}`;
   }
   return copy;
 }
 function ensureHashtags(copy: StrictCopy, product: string, cat?: string): StrictCopy {
-  const firstTag = product.split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, "");
+  const firstTag = firstWordTag(product);
   const catTag = categoryTag(cat);
   const set = new Set<string>(copy.hashtags.map((h) => (h.startsWith("#") ? h : `#${h}`)));
   set.add(`#${firstTag}`);
@@ -177,26 +183,88 @@ function ensureHashtags(copy: StrictCopy, product: string, cat?: string): Strict
   copy.hashtags = Array.from(set).slice(0, 5);
   return copy;
 }
+function looksGeneric(copy: StrictCopy, product: string): boolean {
+  const p = product.trim();
+  const genericStarts =
+    copy.tagline.startsWith(`Meet ${p}`) ||
+    copy.caption.startsWith(`Say hello to ${p}`);
+  const tooShort = copy.tagline.split(/\s+/).length < 2 || copy.caption.split(/\s+/).length < 4;
+  return genericStarts || tooShort;
+}
 
-/* ---- variety fallback so repeated generic text never shows ---- */
-function varietyFallback(product: string): StrictCopy {
-  const adjectives = [
-    "fresh", "clever", "bold", "premium", "eco", "weekend-ready",
-    "ultra-soft", "zero-sugar", "pet-friendly", "lightweight", "cozy"
+/* ------------ deterministic, product-aware fallback composer ------------ */
+function hashString(s: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function pick<T>(arr: T[], seed: number, salt: number) {
+  return arr[(seed + salt) % arr.length];
+}
+
+function composeFallbackCopy(product: string, category?: string, keyBenefit?: string, audience?: string, tone?: string, platform?: string): StrictCopy {
+  const seed = hashString([product, category, keyBenefit, audience, tone, platform].join("|"));
+  const adjTone: Record<string, string[]> = {
+    friendly: ["friendly", "easy", "everyday", "feel-good", "simple"],
+    playful: ["playful", "cheeky", "fun", "vibrant", "lively"],
+    luxury:  ["luxury", "elegant", "refined", "premium", "polished"],
+    bold:    ["bold", "striking", "confident", "punchy", "dynamic"],
+    calm:    ["calm", "soft", "clean", "minimal", "subtle"],
+  };
+  const verbs = ["Discover", "Try", "Meet", "Enjoy", "Upgrade to", "Say hello to", "Treat yourself to"];
+  const closers = ["made for you", "built for daily life", "crafted with care", "designed to delight", "with zero fuss"];
+  const catPhrases: Record<string, string[]> = {
+    beverage: ["refreshment", "flavor", "sips", "energy", "cool down"],
+    skincare: ["glow", "hydration", "smoothness", "care", "routine"],
+    apparel:  ["comfort", "style", "fit", "layers", "everyday wear"],
+    gadget:   ["smarts", "power", "control", "speed", "simplicity"],
+    pet:      ["tail wags", "purrs", "happy bowls", "cleanups", "treat time"],
+    home:     ["coziness", "ease", "tidy spaces", "warmth", "every corner"],
+    food:     ["flavor", "crunch", "protein", "snack time", "goodness"],
+    other:    ["quality", "value", "joy", "fresh starts", "daily wins"],
+  };
+
+  const normCat = (() => {
+    const c = (category || "").toLowerCase();
+    if (/(beverage|drink|coffee|tea|brew)/.test(c)) return "beverage";
+    if (/(skincare|skin|beauty|serum|cream)/.test(c)) return "skincare";
+    if (/(apparel|fashion|clothing|wear)/.test(c)) return "apparel";
+    if (/(gadget|tech|device|electronics)/.test(c)) return "gadget";
+    if (/pet/.test(c)) return "pet";
+    if (/home/.test(c)) return "home";
+    if (/food|snack|granola|protein/.test(c)) return "food";
+    return "other";
+  })();
+
+  const toneKey = (tone || "friendly").toLowerCase();
+  const tones = adjTone[toneKey] || adjTone["friendly"];
+
+  const pWord = clampWords(product, 4);
+  const benefit = keyBenefit?.trim() || pick(catPhrases[normCat], seed, 7);
+  const t1 = pick(tones, seed, 1);
+  const t2 = pick(tones, seed, 2);
+  const v  = pick(verbs, seed, 3);
+  const c1 = pick(closers, seed, 4);
+  const catPhrase = pick(catPhrases[normCat], seed, 5);
+
+  const tagline = clampWords(`${pWord}: ${t1} ${benefit}`, 8);
+  const caption = clampWords(`${v} ${pWord} — ${t2} ${benefit}, ${c1}.`, 22);
+  const shortDescription = `${pWord} brings ${benefit} with a ${t1}, ${t2} feel. Perfect for ${audience || "everyday use"} on ${platform || "social"}.`;
+  const hashtags = [
+    `#${firstWordTag(product)}`,
+    categoryTag(category).toLowerCase(),
+    `#${(benefit || catPhrase).toLowerCase().replace(/[^a-z0-9]+/g, "")}`,
+    "#new",
+    "#daily",
   ];
-  const verbs = ["Discover", "Try", "Meet", "Say hello to", "Treat yourself to"];
-  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
-  const vb  = verbs[Math.floor(Math.random() * verbs.length)];
-  const firstTag = product.split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, "");
 
-  const tagline = `${product}: ${adj} vibes`.slice(0, 48);
-  const caption = `${vb} ${product} — ${adj} and made for you.`.slice(0, 140);
-  const shortDescription = `${product} brings ${adj} quality with every use. Built to impress, easy to love.`;
-  const hashtags = ["#new", "#trending", "#musthave", `#${firstTag}`, "#daily"];
   return { tagline, caption, shortDescription, hashtags };
 }
 
-/* ------------ prompts + images ------------ */
+/* ------------ prompt + images ------------ */
 function makeCopyPrompt(
   product: string,
   category?: string,
@@ -327,15 +395,8 @@ async function groqTry(
     try {
       const r = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${key}`
-        },
-        body: JSON.stringify({
-          model: GROQ_MODEL,
-          temperature: p.temperature,
-          messages
-        }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model: GROQ_MODEL, temperature: p.temperature, messages }),
         cache: "no-store"
       });
       const j = (await r.json()) as GroqChatResponse;
@@ -345,7 +406,7 @@ async function groqTry(
         break;
       }
     } catch {
-      // try next pattern
+      // try next config
     }
   }
 
@@ -372,6 +433,16 @@ export async function POST(req: Request) {
 
     const imgQueries = buildImageQueries(product, category, imageStyle, colorHint, imageQuery);
 
+    // Helper to finalize copy (enforce product mention & tags, and upgrade generic)
+    const finalize = (copyIn: StrictCopy): StrictCopy => {
+      let copy = ensureProductInTagline(copyIn, product);
+      copy = ensureHashtags(copy, product, category);
+      if (looksGeneric(copy, product)) {
+        copy = composeFallbackCopy(product, category, keyBenefit, audience, tone, platform);
+      }
+      return copy;
+    };
+
     /* ---- 1) OpenAI (cloud) ---- */
     if (HAS_OPENAI) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
@@ -388,9 +459,7 @@ export async function POST(req: Request) {
 
         const raw = copyRes.choices?.[0]?.message?.content || "{}";
         const parsed = extractJsonFromText(raw) ?? raw;
-        let copy = coerceCopy(parsed, product);
-        copy = ensureProductInTagline(copy, product);
-        copy = ensureHashtags(copy, product, category);
+        const copy = finalize(coerceCopy(parsed, product));
 
         let imageDataUrl: string | null = null;
         if (includeImage !== false) {
@@ -408,12 +477,9 @@ No text; product-centric; soft lighting; centered composition.
             });
             const b64 = img.data?.[0]?.b64_json;
             if (b64) imageDataUrl = `data:image/png;base64,${b64}`;
-          } catch {
-            // fall back to stock
-          }
+          } catch {}
         }
 
-        // multiple Pexels options
         let photoUrls: string[] = [];
         if (includeImage !== false) {
           for (const q of imgQueries) {
@@ -429,7 +495,7 @@ No text; product-centric; soft lighting; centered composition.
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
-        // fall through to Groq
+        // fall through
       }
     }
 
@@ -438,14 +504,7 @@ No text; product-centric; soft lighting; centered composition.
       try {
         const raw = await groqTry(product, category, keyBenefit, audience, tone, platform);
         const parsed = extractJsonFromText(raw) ?? parseKeyedLines(raw) ?? raw;
-        let copy = coerceCopy(parsed, product);
-
-        if (copy.tagline.startsWith(`Meet ${product}`) && copy.caption.startsWith(`Say hello to ${product}`)) {
-          copy = varietyFallback(product);
-        }
-
-        copy = ensureProductInTagline(copy, product);
-        copy = ensureHashtags(copy, product, category);
+        const copy = finalize(coerceCopy(parsed, product));
 
         let photoUrls: string[] = [];
         if (includeImage !== false) {
@@ -462,7 +521,7 @@ No text; product-centric; soft lighting; centered composition.
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
-        // continue to Ollama or demo
+        // continue
       }
     }
 
@@ -487,7 +546,7 @@ No text; product-centric; soft lighting; centered composition.
             {
               provider: "ollama",
               demo: true,
-              copy: MOCK_COPY(product),
+              copy: composeFallbackCopy(product, category, keyBenefit, audience, tone, platform),
               imageDataUrl: svg,
               photoUrls: [],
               message: "Ollama not ready or model too large. Try llama3.2:1b / phi3:mini.",
@@ -498,9 +557,7 @@ No text; product-centric; soft lighting; centered composition.
 
         const j = (await res.json()) as { response?: string };
         const parsed = extractJsonFromText(j.response ?? "") ?? parseKeyedLines(j.response ?? "") ?? j.response ?? "";
-        let copy = coerceCopy(parsed, product);
-        copy = ensureProductInTagline(copy, product);
-        copy = ensureHashtags(copy, product, category);
+        const copy = composeFallbackCopy(product, category, keyBenefit, audience, tone, platform); // deterministic & product-aware
 
         let photoUrls: string[] = [];
         if (includeImage !== false) {
@@ -517,7 +574,7 @@ No text; product-centric; soft lighting; centered composition.
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
-        // fall through to demo
+        // fall through
       }
     }
 
@@ -532,16 +589,18 @@ No text; product-centric; soft lighting; centered composition.
       }
       photoUrls = Array.from(new Set(photoUrls)).slice(0, 6);
     }
+    const copy = composeFallbackCopy(product, category, keyBenefit, audience, tone, platform);
+
     return NextResponse.json(
       {
         provider: "demo",
         demo: true,
-        copy: MOCK_COPY(product),
+        copy,
         imageDataUrl: svg,
         photoUrls,
         message: isVercel
-          ? "No cloud key configured and Ollama is not reachable in production. Serving demo output."
-          : "AI not available. Serving demo output.",
+          ? "No cloud key configured and Ollama is not reachable in production. Serving deterministic copy."
+          : "AI not available. Serving deterministic copy.",
         rawModelText: "",
       },
       { headers: { "Cache-Control": "no-store" } }
