@@ -12,10 +12,11 @@ type GenResult = {
     shortDescription?: string;
     hashtags?: string[];
   };
-  imageDataUrl?: string | null; // OpenAI PNG (data URL)
-  photoUrl?: string | null;     // Pexels stock photo
+  imageDataUrl?: string | null;
+  photoUrl?: string | null;
   message?: string;
   error?: string;
+  rawModelText?: string; // 👈 for debugging
 };
 
 function placeholderSvgDataUrl(product: string) {
@@ -52,7 +53,6 @@ export default function Home() {
   const [result, setResult] = useState<GenResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // 👉 This is the fetch you’re looking for
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
@@ -62,7 +62,7 @@ export default function Home() {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        cache: "no-store", // avoid CDN/browser caching
+        cache: "no-store",
         body: JSON.stringify({
           product,
           audience,
@@ -215,10 +215,7 @@ export default function Home() {
 
                 <div className="flex justify-between items-center">
                   <strong>Short Description</strong>
-                  <button
-                    className="text-sm underline"
-                    onClick={() => copyToClipboard(result.copy?.shortDescription || "")}
-                  >
+                  <button className="text-sm underline" onClick={() => copyToClipboard(result.copy?.shortDescription || "")}>
                     Copy
                   </button>
                 </div>
@@ -226,15 +223,22 @@ export default function Home() {
 
                 <div className="flex justify-between items-center">
                   <strong>Hashtags</strong>
-                  <button
-                    className="text-sm underline"
-                    onClick={() => copyToClipboard((result.copy?.hashtags || []).join(" "))}
-                  >
+                  <button className="text-sm underline" onClick={() => copyToClipboard((result.copy?.hashtags || []).join(" "))}>
                     Copy
                   </button>
                 </div>
                 <p>{(result.copy?.hashtags || []).join(" ")}</p>
               </div>
+
+              {/* Debug block */}
+              {result.rawModelText ? (
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-sm text-gray-600">Debug: raw model output</summary>
+                  <pre className="mt-2 whitespace-pre-wrap text-xs bg-gray-50 p-2 rounded border">
+                    {result.rawModelText}
+                  </pre>
+                </details>
+              ) : null}
             </div>
 
             {includeImage && (

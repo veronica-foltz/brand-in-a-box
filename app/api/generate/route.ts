@@ -3,7 +3,6 @@ import OpenAI from "openai";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
-// Avoid any caching on Vercel
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
@@ -67,7 +66,7 @@ const toDataUrlSvg = (svg: string) =>
   `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 
 /* ------------ helpers: parsing ------------ */
-// Extract the first JSON object from messy model text (handles ```json fences)
+// Extract first JSON object from messy text (handles ```json fences)
 function extractJsonFromText(text: string): unknown | null {
   if (!text) return null;
   const cleaned = text.replace(/```(?:json)?|```/g, "").trim();
@@ -194,6 +193,82 @@ async function getPexelsPhotoUrl(query: string): Promise<string | null> {
   }
 }
 
+/* ------------ GROQ multi-try helper ------------ */
+async function groqTry(product: string, audience?: string, tone?: string, platform?: string) {
+  const key = process.env.GROQ_API_KEY!;
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+
+  // Attempt 1 — normal JSON prompt
+  const m1 = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      model: "llama3-8b-8192",
+      temperature: 0.85,
+      messages: [
+        { role: "system", content: "Return ONLY a JSON object. No code fences, no markdown." },
+        { role: "user", content: makeCopyPrompt(product, audience, tone, platform) },
+      ],
+    }),
+    cache: "no-store",
+  }).then(r => r.json() as Promise<GroqChatResponse>).catch(() => ({} as GroqChatResponse));
+  let raw = m1?.choices?.[0]?.message?.content || "";
+
+  // Attempt 2 — stricter + few-shot if empty or {}
+  if (!raw || raw.trim() === "{}") {
+    const m2 = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "llama3-8b-8192",
+        temperature: 0.9,
+        messages: [
+          { role: "system", content: "You are a strict JSON generator. Output ONE JSON object ONLY." },
+          {
+            role: "user",
+            content:
+              `Return EXACTLY this structure: {"tagline":"..","caption":"..","shortDescription":"..","hashtags":["#a","#b","#c","#d","#e"]}\n` +
+              `Product: ${product}\nAudience: ${audience || "general consumers"}\nTone: ${tone || "friendly"}\nPlatform: ${platform || "Instagram"}`,
+          },
+          {
+            role: "assistant",
+            content:
+              `{"tagline":"Bold mornings","caption":"Wake up right.","shortDescription":"A rich blend for everyday energy.","hashtags":["#coffee","#morning","#energy","#daily","#love"]}`,
+          },
+          { role: "user", content: "Now do the product above. JSON only." },
+        ],
+      }),
+      cache: "no-store",
+    }).then(r => r.json() as Promise<GroqChatResponse>).catch(() => ({} as GroqChatResponse));
+    raw = m2?.choices?.[0]?.message?.content || raw;
+  }
+
+  // Attempt 3 — key/value lines (we’ll parse)
+  if (!raw || raw.trim() === "{}") {
+    const m3 = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "llama3-8b-8192",
+        temperature: 0.9,
+        messages: [
+          { role: "system", content: "Return ONLY plain text with these keys, no extra text." },
+          {
+            role: "user",
+            content:
+              `Tagline: ...\nCaption: ...\nShort Description: ...\nHashtags: #a #b #c #d #e\n\n` +
+              `Product: ${product}\nAudience: ${audience || "general consumers"}\nTone: ${tone || "friendly"}\nPlatform: ${platform || "Instagram"}`,
+          },
+        ],
+      }),
+      cache: "no-store",
+    }).then(r => r.json() as Promise<GroqChatResponse>).catch(() => ({} as GroqChatResponse));
+    raw = m3?.choices?.[0]?.message?.content || raw;
+  }
+
+  return raw || "";
+}
+
 /* ------------ handler ------------ */
 export async function POST(req: Request) {
   try {
@@ -227,7 +302,7 @@ export async function POST(req: Request) {
         });
 
         const raw = copyRes.choices?.[0]?.message?.content || "{}";
-        const parsed = extractJsonFromText(raw) ?? raw; // allow keyed-lines fallback
+        const parsed = extractJsonFromText(raw) ?? raw;
         const copy = coerceCopy(parsed, product);
 
         let imageDataUrl: string | null = null;
@@ -252,7 +327,7 @@ No text; product-centric; soft lighting; centered composition.
         const photoUrl = imageDataUrl || includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
 
         return NextResponse.json(
-          { provider: "openai", demo: false, copy, imageDataUrl, photoUrl },
+          { provider: "openai", demo: false, copy, imageDataUrl, photoUrl, rawModelText: raw },
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
@@ -263,56 +338,16 @@ No text; product-centric; soft lighting; centered composition.
     /* ---- 1.5) Groq (cloud, free text) ---- */
     if (HAS_GROQ) {
       try {
-        const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.GROQ_API_KEY!}`,
-          },
-          body: JSON.stringify({
-            model: "llama3-8b-8192",
-            temperature: 0.8,
-            messages: [
-              {
-                role: "system",
-                content:
-                  "You are a strict JSON generator. Output a SINGLE JSON object ONLY. No code fences, no markdown, no extra text.",
-              },
-              {
-                role: "user",
-                content:
-                  `Return a JSON object with exactly these keys:
-{"tagline": "<=8 words","caption": "<=140 chars","shortDescription": "<=3 sentences","hashtags": ["#tag1","#tag2","#tag3","#tag4","#tag5"]}
+        const raw = await groqTry(product, audience, tone, platform);
 
-Product: ${product}
-Audience: ${audience || "general consumers"}
-Tone: ${tone || "friendly"}
-Platform: ${platform || "Instagram"}`,
-              },
-              // few-shot example
-              {
-                role: "assistant",
-                content:
-                  `{"tagline":"Bold mornings","caption":"Wake up right.","shortDescription":"A rich blend for everyday energy.","hashtags":["#coffee","#morning","#energy","#daily","#love"]}`,
-              },
-              { role: "user", content: "Now do the product above. Output JSON only." },
-            ],
-          }),
-          cache: "no-store",
-        });
-
-        const j = (await groqRes.json()) as GroqChatResponse;
-        const raw = j.choices?.[0]?.message?.content || "";
-
-        const cleaned = raw.replace(/```(?:json)?|```/g, "").trim();
-        const m = cleaned.match(/\{[\s\S]*\}/);
-        const parsedUnknown = m ? JSON.parse(m[0]) : cleaned;
-        const copy = coerceCopy(parsedUnknown, product);
+        // Try JSON first, else parse keyed lines, else fallback generator will run
+        const parsed = extractJsonFromText(raw) ?? parseKeyedLines(raw) ?? raw;
+        const copy = coerceCopy(parsed, product);
 
         const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
 
         return NextResponse.json(
-          { provider: "groq", demo: false, copy, imageDataUrl: null, photoUrl },
+          { provider: "groq", demo: false, copy, imageDataUrl: null, photoUrl, rawModelText: raw },
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
@@ -351,12 +386,12 @@ Platform: ${platform || "Instagram"}`,
         }
 
         const j = (await res.json()) as { response?: string };
-        const parsed = extractJsonFromText(j.response ?? "") ?? j.response ?? "";
+        const parsed = extractJsonFromText(j.response ?? "") ?? parseKeyedLines(j.response ?? "") ?? j.response ?? "";
         const copy = coerceCopy(parsed, product);
         const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
 
         return NextResponse.json(
-          { provider: "ollama", demo: false, copy, imageDataUrl: null, photoUrl },
+          { provider: "ollama", demo: false, copy, imageDataUrl: null, photoUrl, rawModelText: j.response ?? "" },
           { headers: { "Cache-Control": "no-store" } }
         );
       } catch {
@@ -377,6 +412,7 @@ Platform: ${platform || "Instagram"}`,
         message: isVercel
           ? "No cloud key configured and Ollama is not reachable in production. Serving demo output."
           : "AI not available. Serving demo output.",
+        rawModelText: "",
       },
       { headers: { "Cache-Control": "no-store" } }
     );
