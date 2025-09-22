@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useMemo, useState, useEffect } from "react";
 
 type GenResult = {
@@ -11,7 +12,8 @@ type GenResult = {
     shortDescription?: string;
     hashtags?: string[];
   };
-  imageDataUrl?: string | null;
+  imageDataUrl?: string | null; // OpenAI PNG (data URL)
+  photoUrl?: string | null;     // Pexels stock photo
   message?: string;
   error?: string;
 };
@@ -43,6 +45,9 @@ export default function Home() {
   const [platform, setPlatform] = useState("Instagram");
   const [imageStyle, setImageStyle] = useState("clean, modern, minimal");
   const [colorHint, setColorHint] = useState("");
+  const [includeImage, setIncludeImage] = useState(true);
+  const [imageQuery, setImageQuery] = useState("");
+
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<GenResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,13 +61,26 @@ export default function Home() {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ product, audience, tone, platform, imageStyle, colorHint }),
+        body: JSON.stringify({
+          product,
+          audience,
+          tone,
+          platform,
+          imageStyle,
+          colorHint,
+          includeImage,
+          imageQuery,
+        }),
       });
       const data: GenResult = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Server error");
+      if (!res.ok) {
+        const msg = typeof data?.error === "string" ? data.error : "Server error";
+        throw new Error(msg);
+      }
       setResult(data);
-    } catch (err: any) {
-      setError(err.message || "Failed");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed";
+      setError(msg);
     } finally {
       setLoading(false);
     }
@@ -73,20 +91,16 @@ export default function Home() {
     alert("Copied!");
   }
 
-  // Build a cascade of poster sources:
+  // Build an image source cascade: OpenAI PNG → Pexels → Unsplash → LoremFlickr → Picsum → SVG
   const fallbacks = useMemo(() => {
     const topic = encodeURIComponent(product || "product");
     const tags = encodeURIComponent((product || "product").replace(/\s+/g, ","));
     return [
-      // 1) Real PNG from OpenAI 
       result?.provider === "openai" && result?.imageDataUrl ? result.imageDataUrl : null,
-      // 2) Unsplash topic photo 
+      result?.photoUrl || null,
       `https://source.unsplash.com/1024x1024/?${topic}`,
-      // 3) LoremFlickr topic photo
       `https://loremflickr.com/1024/1024/${tags}`,
-      // 4) Picsum seeded photo
       `https://picsum.photos/seed/${topic}/1024/1024`,
-      // 5) Final guaranteed placeholder
       placeholderSvgDataUrl(product),
     ].filter(Boolean) as string[];
   }, [result, product]);
@@ -95,8 +109,7 @@ export default function Home() {
   useEffect(() => setImgIndex(0), [fallbacks.length, product, result?.provider]);
 
   const posterSrc = fallbacks[imgIndex] || placeholderSvgDataUrl(product);
-  const handleImgError = () =>
-    setImgIndex((i) => Math.min(i + 1, fallbacks.length - 1));
+  const handleImgError = () => setImgIndex((i) => Math.min(i + 1, fallbacks.length - 1));
 
   return (
     <main className="min-h-screen p-6 flex flex-col items-center bg-gray-50 text-gray-900">
@@ -146,6 +159,22 @@ export default function Home() {
               onChange={(e) => setColorHint(e.target.value)}
             />
           </div>
+
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={includeImage}
+              onChange={(e) => setIncludeImage(e.target.checked)}
+            />
+            Include poster image
+          </label>
+          <input
+            className="border p-2 rounded text-gray-900 placeholder:text-gray-700"
+            placeholder="Image keywords (optional, e.g., 'grain-free dog food, kibble, bowl')"
+            value={imageQuery}
+            onChange={(e) => setImageQuery(e.target.value)}
+          />
+
           <button disabled={loading} className="bg-black text-white rounded p-2">
             {loading ? "Making magic…" : "Generate"}
           </button>
@@ -211,18 +240,25 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="bg-white p-4 rounded-xl shadow">
-              <h2 className="font-semibold text-xl mb-2 text-gray-900">Poster Image</h2>
-              <img
-                src={posterSrc}
-                alt="Generated poster"
-                className="rounded-xl w-full max-h-[512px] object-contain"
-                onError={handleImgError}
-              />
-              <a href={posterSrc} download="poster" className="underline mt-2 inline-block">
-                Download image
-              </a>
-            </div>
+            {includeImage && (
+              <div className="bg-white p-4 rounded-xl shadow">
+                <h2 className="font-semibold text-xl mb-2 text-gray-900">Poster Image</h2>
+                <div className="relative w-full h-[512px]">
+                  <Image
+                    src={posterSrc}
+                    alt="Generated poster"
+                    fill
+                    sizes="(max-width: 768px) 100vw, 768px"
+                    className="object-contain rounded-xl"
+                    unoptimized
+                    onError={handleImgError}
+                  />
+                </div>
+                <a href={posterSrc} download="poster" className="underline mt-2 inline-block">
+                  Download image
+                </a>
+              </div>
+            )}
           </section>
         )}
 
