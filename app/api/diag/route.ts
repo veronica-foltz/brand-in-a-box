@@ -18,7 +18,7 @@ export async function GET() {
   else willUse = "demo";
 
   return NextResponse.json(
-    { isVercel, providerEnv, hasGroq, hasOpenAI, pexelsSet, willUse },
+    { isVercel, providerEnv, hasGroq, hasOpenAI, pexelsSet, willUse, model: process.env.GROQ_MODEL || "mixtral-8x7b-32768" },
     { headers: { "Cache-Control": "no-store" } }
   );
 }

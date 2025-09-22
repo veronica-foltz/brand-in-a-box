@@ -38,6 +38,7 @@ const PROVIDER = process.env.AI_PROVIDER || (HAS_OPENAI ? "openai" : "ollama");
 const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:1b";
 const PEXELS_KEY = process.env.PEXELS_API_KEY || "";
+const GROQ_MODEL = process.env.GROQ_MODEL || "mixtral-8x7b-32768"; // <- robust JSON output
 const isVercel = process.env.VERCEL === "1";
 
 /* ------------ helpers: copy + svg ------------ */
@@ -66,7 +67,6 @@ const toDataUrlSvg = (svg: string) =>
   `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 
 /* ------------ helpers: parsing ------------ */
-// Extract first JSON object from messy text (handles ```json fences)
 function extractJsonFromText(text: string): unknown | null {
   if (!text) return null;
   const cleaned = text.replace(/```(?:json)?|```/g, "").trim();
@@ -79,7 +79,6 @@ function extractJsonFromText(text: string): unknown | null {
   }
 }
 
-// Parse "Tagline: ..." lines if there was no JSON at all
 function parseKeyedLines(text: string): CopyShape | null {
   if (!text) return null;
   const get = (re: RegExp) => (text.match(re)?.[1] || "").trim();
@@ -98,7 +97,6 @@ function parseKeyedLines(text: string): CopyShape | null {
   return { tagline, caption, shortDescription, hashtags: hashtagsArr };
 }
 
-// Accept alternate keys and coerce to StrictCopy
 function coerceCopy(input: unknown, product: string): StrictCopy {
   const fallback = MOCK_COPY(product);
 
@@ -145,6 +143,24 @@ function coerceCopy(input: unknown, product: string): StrictCopy {
     if (parsed) return coerceCopy(parsed, product);
   }
   return fallback;
+}
+
+/* ---- variety fallback so every product differs even if model returns {} ---- */
+function varietyFallback(product: string): StrictCopy {
+  const adjectives = [
+    "fresh", "clever", "bold", "premium", "eco", "weekend-ready",
+    "ultra-soft", "zero-sugar", "pet-friendly", "lightweight", "cozy"
+  ];
+  const verbs = ["Discover", "Try", "Meet", "Say hello to", "Treat yourself to"];
+  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+  const vb  = verbs[Math.floor(Math.random() * verbs.length)];
+  const firstTag = product.split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  const tagline = `${adj[0].toUpperCase() + adj.slice(1)} ${product}`.slice(0, 40);
+  const caption = `${vb} ${product} — ${adj} and made for you.`.slice(0, 140);
+  const shortDescription = `${product} brings ${adj} quality with every use. Built to impress, easy to love.`;
+  const hashtags = ["#new", "#trending", "#musthave", `#${firstTag}`, "#daily"];
+  return { tagline, caption, shortDescription, hashtags };
 }
 
 /* ------------ helpers: prompts + images ------------ */
@@ -203,7 +219,7 @@ async function groqTry(product: string, audience?: string, tone?: string, platfo
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({
-      model: "llama3-8b-8192",
+      model: GROQ_MODEL,
       temperature: 0.85,
       messages: [
         { role: "system", content: "Return ONLY a JSON object. No code fences, no markdown." },
@@ -220,7 +236,7 @@ async function groqTry(product: string, audience?: string, tone?: string, platfo
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({
-        model: "llama3-8b-8192",
+        model: GROQ_MODEL,
         temperature: 0.9,
         messages: [
           { role: "system", content: "You are a strict JSON generator. Output ONE JSON object ONLY." },
@@ -249,7 +265,7 @@ async function groqTry(product: string, audience?: string, tone?: string, platfo
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify({
-        model: "llama3-8b-8192",
+        model: GROQ_MODEL,
         temperature: 0.9,
         messages: [
           { role: "system", content: "Return ONLY plain text with these keys, no extra text." },
@@ -339,10 +355,20 @@ No text; product-centric; soft lighting; centered composition.
     if (HAS_GROQ) {
       try {
         const raw = await groqTry(product, audience, tone, platform);
-
-        // Try JSON first, else parse keyed lines, else fallback generator will run
         const parsed = extractJsonFromText(raw) ?? parseKeyedLines(raw) ?? raw;
         const copy = coerceCopy(parsed, product);
+
+        // If parser yielded the generic template, force variety
+        if (
+          copy.tagline.startsWith(`Meet ${product}`) &&
+          copy.caption.startsWith(`Say hello to ${product}`)
+        ) {
+          const alt = varietyFallback(product);
+          copy.tagline = alt.tagline;
+          copy.caption = alt.caption;
+          copy.shortDescription = alt.shortDescription;
+          copy.hashtags = alt.hashtags;
+        }
 
         const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
 

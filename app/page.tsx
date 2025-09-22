@@ -16,7 +16,7 @@ type GenResult = {
   photoUrl?: string | null;
   message?: string;
   error?: string;
-  rawModelText?: string; // 👈 for debugging
+  rawModelText?: string; // for debugging
 };
 
 function placeholderSvgDataUrl(product: string) {
@@ -89,7 +89,6 @@ export default function Home() {
     alert("Copied!");
   }
 
-  // Build image fallbacks
   const fallbacks = useMemo(() => {
     const topic = encodeURIComponent(product || "product");
     const tags = encodeURIComponent((product || "product").replace(/\s+/g, ","));
