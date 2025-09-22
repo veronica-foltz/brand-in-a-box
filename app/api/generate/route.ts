@@ -3,7 +3,11 @@ import OpenAI from "openai";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+// Avoid any caching on Vercel
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
+/* ------------ types ------------ */
 type GenReq = {
   product: string;
   audience?: string;
@@ -19,14 +23,15 @@ type CopyShape = {
   tagline?: string;
   caption?: string;
   shortDescription?: string;
-  hashtags?: string[];
+  hashtags?: string[] | string;
 };
-type StrictCopy = Required<CopyShape>;
+type StrictCopy = Required<Omit<CopyShape, "hashtags">> & { hashtags: string[] };
 
 type PexelsPhoto = { src?: { large2x?: string; large?: string; medium?: string } };
 type PexelsSearch = { photos?: PexelsPhoto[] };
 type GroqChatResponse = { choices?: { message?: { content?: string } }[] };
 
+/* ------------ env ------------ */
 const HAS_OPENAI = !!process.env.OPENAI_API_KEY;
 const HAS_GROQ = !!process.env.GROQ_API_KEY;
 
@@ -36,8 +41,7 @@ const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:1b";
 const PEXELS_KEY = process.env.PEXELS_API_KEY || "";
 const isVercel = process.env.VERCEL === "1";
 
-/* ---------------- helpers ---------------- */
-
+/* ------------ helpers: copy + svg ------------ */
 const MOCK_COPY = (product: string): StrictCopy => ({
   tagline: `Meet ${product}`,
   caption: `Say hello to ${product}! Fresh look, easy choice.`,
@@ -49,57 +53,105 @@ const MOCK_SVG = (product: string) => {
   const txt = product.length > 28 ? product.slice(0, 28) + "…" : product;
   return `
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#222"/>
-      <stop offset="1" stop-color="#666"/>
-    </linearGradient>
-  </defs>
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#222"/><stop offset="1" stop-color="#666"/>
+  </linearGradient></defs>
   <rect width="100%" height="100%" fill="url(#g)"/>
   <circle cx="512" cy="512" r="280" fill="#fff" opacity="0.08"/>
   <circle cx="680" cy="380" r="160" fill="#fff" opacity="0.05"/>
-  <text x="50%" y="52%" text-anchor="middle"
-        font-family="Inter, Arial, sans-serif" font-size="64"
-        fill="#ffffff" opacity="0.95">${txt}</text>
+  <text x="50%" y="52%" text-anchor="middle" font-family="Inter, Arial, sans-serif"
+        font-size="64" fill="#fff" opacity="0.95">${txt}</text>
 </svg>`;
 };
-function toDataUrlSvg(svg: string) {
-  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
-}
+const toDataUrlSvg = (svg: string) =>
+  `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 
-// Extract first JSON object from any text (handles code fences, extra chatter)
+/* ------------ helpers: parsing ------------ */
+// Extract the first JSON object from messy model text (handles ```json fences)
 function extractJsonFromText(text: string): unknown | null {
-  const m = text.match(/\{[\s\S]*\}/);
+  if (!text) return null;
+  const cleaned = text.replace(/```(?:json)?|```/g, "").trim();
+  const m = cleaned.match(/\{[\s\S]*\}/);
   if (!m) return null;
-  try { return JSON.parse(m[0]); } catch { return null; }
+  try {
+    return JSON.parse(m[0]);
+  } catch {
+    return null;
+  }
 }
 
-function isCopyShape(x: unknown): x is CopyShape {
-  if (typeof x !== "object" || x === null) return false;
-  const o = x as Record<string, unknown>;
-  const okStr = (v: unknown) => v === undefined || typeof v === "string";
-  const okArr =
-    !("hashtags" in o) ||
-    (Array.isArray(o.hashtags) && (o.hashtags as unknown[]).every((t) => typeof t === "string"));
-  return okStr(o.tagline) && okStr(o.caption) && okStr(o.shortDescription) && okArr;
+// Parse "Tagline: ..." lines if there was no JSON at all
+function parseKeyedLines(text: string): CopyShape | null {
+  if (!text) return null;
+  const get = (re: RegExp) => (text.match(re)?.[1] || "").trim();
+  const tagline = get(/tagline\s*:\s*([^\n]+)/i);
+  const caption = get(/caption\s*:\s*([^\n]+)/i);
+  const shortDescription = get(/short\s*description\s*:\s*([\s\S]*?)(?:\n\w+:|$)/i);
+  const hashtagsRaw = get(/hashtags?\s*:\s*([^\n]+)/i);
+  const hashtagsArr = hashtagsRaw
+    ? hashtagsRaw
+        .split(/[, ]+/)
+        .map((t) => t.replace(/^#*/, "").trim())
+        .filter(Boolean)
+        .map((t) => `#${t}`)
+    : [];
+  if (!tagline && !caption && !shortDescription && hashtagsArr.length === 0) return null;
+  return { tagline, caption, shortDescription, hashtags: hashtagsArr };
 }
-function normalizeCopy(input: unknown, product: string): StrictCopy {
+
+// Accept alternate keys and coerce to StrictCopy
+function coerceCopy(input: unknown, product: string): StrictCopy {
   const fallback = MOCK_COPY(product);
-  if (!isCopyShape(input)) return fallback;
-  return {
-    tagline: input.tagline ?? fallback.tagline,
-    caption: input.caption ?? fallback.caption,
-    shortDescription: input.shortDescription ?? fallback.shortDescription,
-    hashtags:
-      Array.isArray(input.hashtags) && input.hashtags.length > 0
-        ? input.hashtags.slice(0, 5)
-        : fallback.hashtags,
-  };
+
+  if (typeof input === "object" && input !== null) {
+    const o = input as Record<string, unknown>;
+    const pick = (...keys: string[]) => {
+      for (const k of keys) {
+        const v = o[k];
+        if (typeof v === "string" && v.trim()) return v.trim();
+      }
+      return undefined;
+    };
+
+    const tagline = pick("tagline", "title", "headline");
+    const caption = pick("caption", "subtitle", "socialCaption");
+    const shortDescription = pick("shortDescription", "short_description", "description", "blurb");
+
+    let hashtags: string[] = [];
+    const raw = o["hashtags"];
+    if (Array.isArray(raw)) {
+      hashtags = raw
+        .map((t) => (typeof t === "string" ? t : ""))
+        .filter(Boolean)
+        .map((t) => t.replace(/^#*/, ""))
+        .map((t) => `#${t}`);
+    } else if (typeof raw === "string") {
+      hashtags = raw
+        .split(/[, ]+/)
+        .map((t) => t.replace(/^#*/, ""))
+        .filter(Boolean)
+        .map((t) => `#${t}`);
+    }
+
+    return {
+      tagline: tagline || fallback.tagline,
+      caption: caption || fallback.caption,
+      shortDescription: shortDescription || fallback.shortDescription,
+      hashtags: hashtags.length ? hashtags.slice(0, 5) : fallback.hashtags,
+    };
+  }
+
+  if (typeof input === "string") {
+    const parsed = parseKeyedLines(input);
+    if (parsed) return coerceCopy(parsed, product);
+  }
+  return fallback;
 }
 
+/* ------------ helpers: prompts + images ------------ */
 function makeCopyPrompt(product: string, audience?: string, tone?: string, platform?: string) {
   return `
-You are a marketing writer. Return ONLY valid JSON (no code fences, no markdown, no commentary).
+You are a marketing writer. Respond ONLY with a JSON object — no code fences, no markdown.
 JSON schema:
 {
   "tagline": string,         // <= 8 words, catchy
@@ -115,7 +167,12 @@ Platform: ${platform || "Instagram"}
 `.trim();
 }
 
-function buildPhotoQuery(product: string, imageStyle?: string, colorHint?: string, imageQuery?: string) {
+function buildPhotoQuery(
+  product: string,
+  imageStyle?: string,
+  colorHint?: string,
+  imageQuery?: string
+) {
   const q = imageQuery?.trim();
   if (q) return q;
   return [product, imageStyle, colorHint].filter(Boolean).join(" ").trim();
@@ -124,32 +181,45 @@ function buildPhotoQuery(product: string, imageStyle?: string, colorHint?: strin
 async function getPexelsPhotoUrl(query: string): Promise<string | null> {
   if (!PEXELS_KEY) return null;
   try {
-    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=1&orientation=square`;
-    const res = await fetch(url, { headers: { Authorization: PEXELS_KEY } });
+    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(
+      query
+    )}&per_page=1&orientation=square`;
+    const res = await fetch(url, { headers: { Authorization: PEXELS_KEY }, cache: "no-store" });
     if (!res.ok) return null;
     const j = (await res.json()) as PexelsSearch;
     const p = j.photos?.[0];
     return p?.src?.large2x || p?.src?.large || p?.src?.medium || null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-/* ---------------- handler ---------------- */
-
+/* ------------ handler ------------ */
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as GenReq;
-    const { product, audience, tone, platform, imageStyle, colorHint, includeImage, imageQuery } = body || {};
+    const {
+      product,
+      audience,
+      tone,
+      platform,
+      imageStyle,
+      colorHint,
+      includeImage,
+      imageQuery,
+    } = body || {};
     if (!product) return NextResponse.json({ error: "Missing product" }, { status: 400 });
 
     const photoQuery = buildPhotoQuery(product, imageStyle, colorHint, imageQuery);
 
-    // 1) OpenAI (cloud)
+    /* ---- 1) OpenAI (cloud) ---- */
     if (HAS_OPENAI) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
       try {
         const copyRes = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          temperature: 0.75,
+          temperature: 0.9,
+          response_format: { type: "json_object" },
           messages: [
             { role: "system", content: "Return only valid JSON, no markdown or code fences." },
             { role: "user", content: makeCopyPrompt(product, audience, tone, platform) },
@@ -157,35 +227,40 @@ export async function POST(req: Request) {
         });
 
         const raw = copyRes.choices?.[0]?.message?.content || "{}";
-        const parsed = extractJsonFromText(raw);       // ✅ robust parse
-        const copy = normalizeCopy(parsed, product);
+        const parsed = extractJsonFromText(raw) ?? raw; // allow keyed-lines fallback
+        const copy = coerceCopy(parsed, product);
 
         let imageDataUrl: string | null = null;
         if (includeImage !== false) {
           try {
-            const imgPrompt = `
-High-quality marketing poster for: ${product}.
-Style: ${imageStyle || "clean, modern, minimal"}
-Primary colors hint: ${colorHint || "brand neutral"}
-No words on the image; product-focused visuals; centered composition; soft shadows.
-`;
             const img = await openai.images.generate({
               model: "gpt-image-1",
-              prompt: imgPrompt,
+              prompt: `
+Marketing poster for: ${product}.
+Style: ${imageStyle || "clean, modern, minimal"}; Colors: ${colorHint || "brand neutral"}.
+No text; product-centric; soft lighting; centered composition.
+`,
               size: "512x512",
               response_format: "b64_json",
             });
             const b64 = img.data?.[0]?.b64_json;
             if (b64) imageDataUrl = `data:image/png;base64,${b64}`;
-          } catch { /* ignore; fall back to stock photo */ }
+          } catch {
+            // use stock
+          }
         }
-
         const photoUrl = imageDataUrl || includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
-        return NextResponse.json({ provider: "openai", demo: false, copy, imageDataUrl, photoUrl });
-      } catch { /* fall through */ }
+
+        return NextResponse.json(
+          { provider: "openai", demo: false, copy, imageDataUrl, photoUrl },
+          { headers: { "Cache-Control": "no-store" } }
+        );
+      } catch {
+        // fall through
+      }
     }
 
-    // 1.5) Groq (cloud, free text) – image via stock photo
+    /* ---- 1.5) Groq (cloud, free text) ---- */
     if (HAS_GROQ) {
       try {
         const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -196,27 +271,56 @@ No words on the image; product-focused visuals; centered composition; soft shado
           },
           body: JSON.stringify({
             model: "llama3-8b-8192",
-            temperature: 0.75,
+            temperature: 0.8,
             messages: [
-              { role: "system", content: "Return only valid JSON, no markdown or code fences." },
-              { role: "user", content: makeCopyPrompt(product, audience, tone, platform) },
+              {
+                role: "system",
+                content:
+                  "You are a strict JSON generator. Output a SINGLE JSON object ONLY. No code fences, no markdown, no extra text.",
+              },
+              {
+                role: "user",
+                content:
+                  `Return a JSON object with exactly these keys:
+{"tagline": "<=8 words","caption": "<=140 chars","shortDescription": "<=3 sentences","hashtags": ["#tag1","#tag2","#tag3","#tag4","#tag5"]}
+
+Product: ${product}
+Audience: ${audience || "general consumers"}
+Tone: ${tone || "friendly"}
+Platform: ${platform || "Instagram"}`,
+              },
+              // few-shot example
+              {
+                role: "assistant",
+                content:
+                  `{"tagline":"Bold mornings","caption":"Wake up right.","shortDescription":"A rich blend for everyday energy.","hashtags":["#coffee","#morning","#energy","#daily","#love"]}`,
+              },
+              { role: "user", content: "Now do the product above. Output JSON only." },
             ],
           }),
-          // avoid any weird caching
           cache: "no-store",
         });
 
         const j = (await groqRes.json()) as GroqChatResponse;
-        const raw = j.choices?.[0]?.message?.content || "{}";
-        const parsed = extractJsonFromText(raw);       // ✅ robust parse
-        const copy = normalizeCopy(parsed, product);
+        const raw = j.choices?.[0]?.message?.content || "";
+
+        const cleaned = raw.replace(/```(?:json)?|```/g, "").trim();
+        const m = cleaned.match(/\{[\s\S]*\}/);
+        const parsedUnknown = m ? JSON.parse(m[0]) : cleaned;
+        const copy = coerceCopy(parsedUnknown, product);
 
         const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
-        return NextResponse.json({ provider: "groq", demo: false, copy, imageDataUrl: null, photoUrl });
-      } catch { /* fall through */ }
+
+        return NextResponse.json(
+          { provider: "groq", demo: false, copy, imageDataUrl: null, photoUrl },
+          { headers: { "Cache-Control": "no-store" } }
+        );
+      } catch {
+        // continue
+      }
     }
 
-    // 2) Ollama (local dev only)
+    /* ---- 2) Ollama (local dev only) ---- */
     if (!isVercel && PROVIDER === "ollama") {
       try {
         const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
@@ -228,37 +332,54 @@ No words on the image; product-focused visuals; centered composition; soft shado
             stream: false,
             options: { num_ctx: 512, num_predict: 256 },
           }),
+          cache: "no-store",
         });
 
         if (!res.ok) {
           const svg = toDataUrlSvg(MOCK_SVG(product));
-          return NextResponse.json({
-            provider: "ollama", demo: true, copy: MOCK_COPY(product), imageDataUrl: svg, photoUrl: null,
-            message: "Ollama not ready or model too large. Try llama3.2:1b / phi3:mini.",
-          });
+          return NextResponse.json(
+            {
+              provider: "ollama",
+              demo: true,
+              copy: MOCK_COPY(product),
+              imageDataUrl: svg,
+              photoUrl: null,
+              message: "Ollama not ready or model too large. Try llama3.2:1b / phi3:mini.",
+            },
+            { headers: { "Cache-Control": "no-store" } }
+          );
         }
 
         const j = (await res.json()) as { response?: string };
-        const parsed = extractJsonFromText(j.response ?? "");
-        const copy = normalizeCopy(parsed, product);
+        const parsed = extractJsonFromText(j.response ?? "") ?? j.response ?? "";
+        const copy = coerceCopy(parsed, product);
         const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
-        return NextResponse.json({ provider: "ollama", demo: false, copy, imageDataUrl: null, photoUrl });
-      } catch { /* fall through */ }
+
+        return NextResponse.json(
+          { provider: "ollama", demo: false, copy, imageDataUrl: null, photoUrl },
+          { headers: { "Cache-Control": "no-store" } }
+        );
+      } catch {
+        // fall through
+      }
     }
 
-    // 3) Demo fallback
+    /* ---- 3) Demo fallback ---- */
     const svg = toDataUrlSvg(MOCK_SVG(product));
     const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
-    return NextResponse.json({
-      provider: "demo",
-      demo: true,
-      copy: MOCK_COPY(product),
-      imageDataUrl: svg,
-      photoUrl,
-      message: isVercel
-        ? "No cloud key configured and Ollama is not reachable in production. Serving demo output."
-        : "AI not available. Serving demo output.",
-    });
+    return NextResponse.json(
+      {
+        provider: "demo",
+        demo: true,
+        copy: MOCK_COPY(product),
+        imageDataUrl: svg,
+        photoUrl,
+        message: isVercel
+          ? "No cloud key configured and Ollama is not reachable in production. Serving demo output."
+          : "AI not available. Serving demo output.",
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    );
   } catch {
     return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
