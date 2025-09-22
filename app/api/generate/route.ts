@@ -9,8 +9,8 @@ export const revalidate = 0;
 /* ------------ request & data types ------------ */
 type GenReq = {
   product: string;
-  category?: string;     // e.g., "Beverage", "Skincare"
-  keyBenefit?: string;   // e.g., "smoother skin"
+  category?: string;
+  keyBenefit?: string;
   audience?: string;
   tone?: string;
   platform?: string;
@@ -40,13 +40,14 @@ const PROVIDER = process.env.AI_PROVIDER || (HAS_OPENAI ? "openai" : "ollama");
 const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:1b";
 const PEXELS_KEY = process.env.PEXELS_API_KEY || "";
-const GROQ_MODEL = process.env.GROQ_MODEL || "mixtral-8x7b-32768";
+const DEFAULT_GROQ_MODEL = process.env.GROQ_MODEL || "llama3-70b-8192"; // higher quality
 const isVercel = process.env.VERCEL === "1";
 
-/* ========== UTILITIES ========== */
-const clampWords = (s: string, max: number) => s.trim().split(/\s+/).slice(0, max).join(" ");
+/* ======== tiny utils ======== */
+const clampWords = (s: string, n: number) => s.trim().split(/\s+/).slice(0, n).join(" ");
 const firstWordTag = (s: string) => s.trim().split(/\s+/)[0]?.toLowerCase().replace(/[^a-z0-9]/g, "") || "brand";
 const slugParts = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+
 const categoryTag = (cat?: string) => {
   const c = (cat || "").toLowerCase();
   if (/(beverage|drink|coffee|tea|brew)/.test(c)) return "#beverage";
@@ -59,7 +60,7 @@ const categoryTag = (cat?: string) => {
   return "#brand";
 };
 
-/* ========== FALLBACK SVG (for demo/no-image) ========== */
+/* ======== fallback poster svg ======== */
 const MOCK_SVG = (product: string) => {
   const txt = product.length > 28 ? product.slice(0, 28) + "…" : product;
   return `
@@ -76,7 +77,7 @@ const MOCK_SVG = (product: string) => {
 };
 const toDataUrlSvg = (svg: string) => `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 
-/* ========== ROBUST PARSING FOR LLM OUTPUT ========== */
+/* ======== LLM parsing ======== */
 function extractJsonFromText(text: string): unknown | null {
   if (!text) return null;
   const cleaned = text.replace(/```(?:json)?|```/g, "").trim();
@@ -139,7 +140,7 @@ function coerceCopy(input: unknown, product: string): StrictCopy {
   return fallback;
 }
 
-/* ========== QUALITY CHECKS & ENFORCEMENT ========== */
+/* ======== quality checks ======== */
 function ensureProductInTagline(copy: StrictCopy, product: string): StrictCopy {
   const p = product.trim();
   if (p && !copy.tagline.toLowerCase().includes(p.toLowerCase())) {
@@ -159,32 +160,23 @@ function looksGeneric(copy: StrictCopy, product: string, category?: string, bene
   const p = product.trim().toLowerCase();
   const c = (category || "").trim().toLowerCase();
   const b = (benefit || "").trim().toLowerCase();
-
   const mentionsProduct = p && (copy.tagline.toLowerCase().includes(p) || copy.caption.toLowerCase().includes(p));
   const mentionsCatOrBenefit = (!!c && (copy.tagline.toLowerCase().includes(c) || copy.caption.toLowerCase().includes(c))) ||
                                (!!b && (copy.tagline.toLowerCase().includes(b) || copy.caption.toLowerCase().includes(b)));
-
   const tooShort = copy.tagline.split(/\s+/).length < 2 || copy.caption.split(/\s+/).length < 4;
-  const isTemplatey =
-    copy.tagline.startsWith(`Meet ${product}`) || copy.caption.startsWith(`Say hello to ${product}`);
-
-  // We want BOTH a product mention and either a category or benefit.
-  return !mentionsProduct || !mentionsCatOrBenefit || tooShort || isTemplatey;
+  const templatey = copy.tagline.startsWith(`Meet ${product}`) || copy.caption.startsWith(`Say hello to ${product}`);
+  return !mentionsProduct || !mentionsCatOrBenefit || tooShort || templatey;
 }
 
-/* ========== DETERMINISTIC, PRODUCT-AWARE COMPOSER ========== */
+/* ======== deterministic composer (never generic) ======== */
 function hashString(s: string): number {
   let h = 2166136261 >>> 0;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
   return h >>> 0;
 }
-function pick<T>(arr: T[], seed: number, salt: number) {
-  return arr[(seed + salt) % arr.length];
-}
-function composeFallbackCopy(
+function pick<T>(arr: T[], seed: number, salt: number) { return arr[(seed + salt) % arr.length]; }
+
+function composeCopy(
   product: string,
   category?: string,
   keyBenefit?: string,
@@ -193,7 +185,6 @@ function composeFallbackCopy(
   platform?: string
 ): StrictCopy {
   const seed = hashString([product, category, keyBenefit, audience, tone, platform].join("|"));
-
   const toneWords: Record<string, string[]> = {
     friendly: ["friendly", "easy", "everyday", "feel-good", "simple", "welcoming"],
     playful:  ["playful", "cheeky", "fun", "vibrant", "lively", "bright"],
@@ -242,23 +233,16 @@ function composeFallbackCopy(
   const catPhrase = pick(catBits[normCat], seed, 6);
   const benefit = (keyBenefit && keyBenefit.trim()) || pick(catBits[normCat], seed, 7);
 
-  // Several template options – seed chooses one deterministically
   const templates = [
-    {
-      tagline: clampWords(`${pShort}: ${t1} ${benefit}`, 8),
-      caption: clampWords(`${v} ${pShort} — ${t2} ${benefit}, ${c1}.`, 24),
-      desc:    `${pShort} brings ${benefit} with a ${t1}, ${t2} feel. Perfect for ${audience || "everyone"} on ${platform || "social"}.`,
-    },
-    {
-      tagline: clampWords(`${pEmph} • ${benefit} ${normCat !== "other" ? "for " + normCat : ""}`, 8),
-      caption: clampWords(`${v} ${pShort} and feel the ${catPhrase}. Built for ${uc}.`, 24),
-      desc:    `Made to deliver ${benefit} without the guesswork. ${pShort} fits right into ${audience || "your"} routine.`,
-    },
-    {
-      tagline: clampWords(`${pShort}: ${catPhrase}, ${benefit}`, 8),
-      caption: clampWords(`${v} the ${t1} choice — ${pShort} keeps ${uc} simple.`, 24),
-      desc:    `${pShort} focuses on ${benefit}. A ${t2} touch that works across ${platform || "every platform"}.`,
-    },
+    { tl: clampWords(`${pShort}: ${t1} ${benefit}`, 8),
+      cp: clampWords(`${v} ${pShort} — ${t2} ${benefit}, ${c1}.`, 26),
+      sd: `${pShort} brings ${benefit} with a ${t1}, ${t2} feel. Perfect for ${audience || "everyone"} on ${platform || "social"}.` },
+    { tl: clampWords(`${pEmph} • ${benefit} ${normCat !== "other" ? "for " + normCat : ""}`, 8),
+      cp: clampWords(`${v} ${pShort} and feel the ${catPhrase}. Built for ${uc}.`, 26),
+      sd: `Made to deliver ${benefit} without the guesswork. ${pShort} fits right into ${audience || "your"} routine.` },
+    { tl: clampWords(`${pShort}: ${catPhrase}, ${benefit}`, 8),
+      cp: clampWords(`${v} the ${t1} choice — ${pShort} keeps ${uc} simple.`, 26),
+      sd: `${pShort} focuses on ${benefit}. A ${t2} touch that works across ${platform || "every platform"}.` },
   ];
   const pickT = templates[seed % templates.length];
 
@@ -271,21 +255,15 @@ function composeFallbackCopy(
   ]);
 
   return {
-    tagline: pickT.tagline,
-    caption: pickT.caption,
-    shortDescription: pickT.desc,
+    tagline: pickT.tl,
+    caption: pickT.cp,
+    shortDescription: pickT.sd,
     hashtags: Array.from(tags).slice(0, 5),
   };
 }
 
-/* ========== IMAGE HELPERS (Pexels multi-candidates) ========== */
-function buildImageQueries(
-  product: string,
-  category?: string,
-  imageStyle?: string,
-  colorHint?: string,
-  imageQuery?: string
-) {
+/* ======== images (Pexels multi-candidates) ======== */
+function buildImageQueries(product: string, category?: string, imageStyle?: string, colorHint?: string, imageQuery?: string) {
   const qUser = (imageQuery || "").trim();
   const base = [product, category, imageStyle, colorHint].filter(Boolean).join(" ").trim();
   const queries = [
@@ -298,30 +276,27 @@ function buildImageQueries(
 async function getPexelsPhotos(query: string, n: number): Promise<string[]> {
   if (!PEXELS_KEY) return [];
   try {
-    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${Math.min(
-      Math.max(n, 1), 12
-    )}&orientation=square`;
+    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${Math.min(Math.max(n,1),12)}&orientation=square`;
     const res = await fetch(url, { headers: { Authorization: PEXELS_KEY }, cache: "no-store" });
     if (!res.ok) return [];
     const j = (await res.json()) as PexelsSearch;
     const photos = j.photos || [];
-    return photos
-      .map(p => p?.src?.large2x || p?.src?.large || p?.src?.medium)
-      .filter((u): u is string => !!u);
+    return photos.map(p => p?.src?.large2x || p?.src?.large || p?.src?.medium).filter((u): u is string => !!u);
   } catch { return []; }
 }
 
-/* ========== LLM HELPERS ========== */
-type GroqMsg = { role: "system" | "user" | "assistant"; content: string };
-function makeCopyPrompt(
-  product: string,
-  category?: string,
-  keyBenefit?: string,
-  audience?: string,
-  tone?: string,
-  platform?: string
-) {
-  return `
+/* ======== Groq helper (try multiple models, low temp) ======== */
+async function groqJSON(product: string, category?: string, keyBenefit?: string, audience?: string, tone?: string, platform?: string) {
+  const key = process.env.GROQ_API_KEY!;
+  const url = "https://api.groq.com/openai/v1/chat/completions";
+  const models = [
+    DEFAULT_GROQ_MODEL,              // e.g., llama3-70b-8192
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+  ];
+  const messages = [
+    { role: "system", content: "Return ONLY a JSON object. No code fences, no markdown." },
+    { role: "user", content: `
 You are a precise marketing writer. Do NOT invent ingredients, specs, numbers, or health claims.
 
 Return ONLY a JSON object (no markdown). Schema:
@@ -343,113 +318,113 @@ Inputs:
 Constraints:
 - Mention the product or its category in the tagline.
 - Hashtags: short, lowercase, no spaces; 5 total.
-`.trim();
-}
-async function groqTry(
-  product: string,
-  category?: string,
-  keyBenefit?: string,
-  audience?: string,
-  tone?: string,
-  platform?: string
-) {
-  const key = process.env.GROQ_API_KEY!;
-  const url = "https://api.groq.com/openai/v1/chat/completions";
-  const configs: { temperature: number; fewshot: boolean; lines: boolean }[] = [
-    { temperature: 0.8,  fewshot: false, lines: false },
-    { temperature: 0.9,  fewshot: true,  lines: false },
-    { temperature: 0.95, fewshot: false, lines: true  },
+`.trim() }
   ];
-  let raw = "";
-  for (const cfg of configs) {
-    const messages: GroqMsg[] = [];
-    if (!cfg.lines) {
-      messages.push({ role: "system", content: "Return ONLY a JSON object. No code fences." });
-      messages.push({ role: "user", content: makeCopyPrompt(product, category, keyBenefit, audience, tone, platform) });
-      if (cfg.fewshot) {
-        messages.push({ role: "assistant", content: `{"tagline":"Bold mornings","caption":"Wake up right.","shortDescription":"A rich blend for everyday energy.","hashtags":["#coffee","#morning","#energy","#daily","#love"]}` });
-        messages.push({ role: "user", content: "Now do the product above. JSON only." });
-      }
-    } else {
-      messages.push({ role: "system", content: "Return ONLY plain text with these keys." });
-      messages.push({ role: "user", content:
-        `Tagline: ...\nCaption: ...\nShort Description: ...\nHashtags: #a #b #c #d #e\n\n` +
-        `product: ${product}\ncategory: ${category || "unspecified"}\nbenefit: ${keyBenefit || "unspecified"}\n` +
-        `audience: ${audience || "general"}\ntone: ${tone || "friendly"}\nplatform: ${platform || "Instagram"}`
-      });
-    }
+
+  for (const model of models) {
     try {
       const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ model: GROQ_MODEL, temperature: cfg.temperature, messages }),
-        cache: "no-store"
+        body: JSON.stringify({ model, temperature: 0.5, messages }), // lower temp => on-topic
+        cache: "no-store",
       });
       const j = (await r.json()) as GroqChatResponse;
-      const cand = j?.choices?.[0]?.message?.content?.trim() ?? "";
-      if (cand && cand !== "{}") { raw = cand; break; }
-    } catch { /* try next */ }
+      const raw = j?.choices?.[0]?.message?.content?.trim() ?? "";
+      if (raw) return raw;
+    } catch { /* try next model */ }
   }
-  return raw || "";
+  return "";
 }
 
 /* ========== MAIN HANDLER ========== */
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as GenReq;
-    const {
-      product, category, keyBenefit, audience, tone, platform,
-      imageStyle, colorHint, includeImage, imageQuery,
-    } = body || {};
+    const { product, category, keyBenefit, audience, tone, platform, imageStyle, colorHint, includeImage, imageQuery } = body || {};
     if (!product) return NextResponse.json({ error: "Missing product" }, { status: 400 });
 
-    // 0) Compose deterministic, product-specific copy first (baseline)
-    const composed = composeFallbackCopy(product, category, keyBenefit, audience, tone, platform);
-
-    // 1) Try LLM (OpenAI/Groq). Use only if it passes quality; else stick to composed
-    let providerUsed: "openai" | "groq" | "ollama" | "demo" = "demo";
-    let copy: StrictCopy = composed;
+    // 0) Always build solid, product-aware copy locally first
+    let copy: StrictCopy = composeCopy(product, category, keyBenefit, audience, tone, platform);
+    let provider: "openai" | "groq" | "ollama" | "demo" = "demo";
     let rawModelText = "";
 
+    // 1) Try OpenAI (if configured). Accept only if passes relevance.
     if (HAS_OPENAI) {
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
       try {
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
         const res = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          temperature: 0.85,
+          temperature: 0.6,
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: "Return only valid JSON, no markdown or code fences." },
-            { role: "user", content: makeCopyPrompt(product, category, keyBenefit, audience, tone, platform) },
+            { role: "user", content: `
+You are a precise marketing writer. Do NOT invent ingredients, specs, numbers, or health claims.
+
+Return ONLY a JSON object with keys: tagline, caption, shortDescription, hashtags (5 items).
+The tagline must reference the product or category. The caption should be <= 140 chars.
+Product: ${product}; Category: ${category || "unspecified"}; Benefit: ${keyBenefit || "unspecified"};
+Audience: ${audience || "general consumers"}; Tone: ${tone || "friendly"}; Platform: ${platform || "Instagram"}.
+`.trim() },
           ],
         });
         const raw = res.choices?.[0]?.message?.content || "";
         rawModelText = raw;
         const parsed = extractJsonFromText(raw) ?? parseKeyedLines(raw) ?? raw;
         const candidate = coerceCopy(parsed, product);
-        const candidateEnforced = ensureHashtags(ensureProductInTagline(candidate, product), product, category);
-        if (!looksGeneric(candidateEnforced, product, category, keyBenefit)) {
-          copy = candidateEnforced;
-          providerUsed = "openai";
+        const enforced = ensureHashtags(ensureProductInTagline(candidate, product), product, category);
+        if (!looksGeneric(enforced, product, category, keyBenefit)) {
+          copy = enforced;
+          provider = "openai";
         }
-      } catch { /* fall through to Groq */ }
+      } catch { /* move on */ }
     }
 
-    if (providerUsed === "demo" && HAS_GROQ) {
+    // 2) Try Groq (if still on demo). Accept only if passes relevance.
+    if (provider === "demo" && HAS_GROQ) {
       try {
-        const raw = await groqTry(product, category, keyBenefit, audience, tone, platform);
+        const raw = await groqJSON(product, category, keyBenefit, audience, tone, platform);
         rawModelText = raw || rawModelText;
         const parsed = extractJsonFromText(raw) ?? parseKeyedLines(raw) ?? raw;
         const candidate = coerceCopy(parsed, product);
-        const candidateEnforced = ensureHashtags(ensureProductInTagline(candidate, product), product, category);
-        if (!looksGeneric(candidateEnforced, product, category, keyBenefit)) {
-          copy = candidateEnforced;
-          providerUsed = "groq";
+        const enforced = ensureHashtags(ensureProductInTagline(candidate, product), product, category);
+        if (!looksGeneric(enforced, product, category, keyBenefit)) {
+          copy = enforced;
+          provider = "groq";
         }
-      } catch { /* continue */ }
+      } catch { /* ignore */ }
     }
 
-    // 2) Images (Pexels multi-candidates)
+    // 3) Optional: Ollama (local dev only; we still keep composed unless it passes)
+    if (!isVercel && PROVIDER === "ollama" && provider === "demo") {
+      try {
+        const r = await fetch(`${OLLAMA_BASE}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: OLLAMA_MODEL,
+            prompt: `Return ONLY JSON: {"tagline":"..","caption":"..","shortDescription":"..","hashtags":["#a","#b","#c","#d","#e"]}\nProduct:${product}; Category:${category}; Benefit:${keyBenefit}; Audience:${audience}; Tone:${tone}; Platform:${platform}`,
+            stream: false,
+            options: { num_ctx: 512, num_predict: 256 },
+          }),
+          cache: "no-store",
+        });
+        if (r.ok) {
+          const j = (await r.json()) as { response?: string };
+          rawModelText = j.response || rawModelText;
+          const parsed = extractJsonFromText(j.response ?? "") ?? parseKeyedLines(j.response ?? "") ?? j.response ?? "";
+          const candidate = coerceCopy(parsed, product);
+          const enforced = ensureHashtags(ensureProductInTagline(candidate, product), product, category);
+          if (!looksGeneric(enforced, product, category, keyBenefit)) {
+            copy = enforced;
+            provider = "ollama";
+          }
+        }
+      } catch {}
+    }
+
+    // 4) Images (Pexels multi-candidates; you said this is perfect)
     const imgQueries = buildImageQueries(product, category, imageStyle, colorHint, imageQuery);
     let photoUrls: string[] = [];
     if (includeImage !== false) {
@@ -461,47 +436,18 @@ export async function POST(req: Request) {
       photoUrls = Array.from(new Set(photoUrls)).slice(0, 6);
     }
 
-    // 3) Local Ollama path (dev only)
-    if (!isVercel && PROVIDER === "ollama" && providerUsed === "demo") {
-      try {
-        const r = await fetch(`${OLLAMA_BASE}/api/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: OLLAMA_MODEL,
-            prompt: makeCopyPrompt(product, category, keyBenefit, audience, tone, platform),
-            stream: false,
-            options: { num_ctx: 512, num_predict: 256 },
-          }),
-          cache: "no-store",
-        });
-        if (r.ok) {
-          const j = (await r.json()) as { response?: string };
-          rawModelText = j.response || rawModelText;
-          // we still keep composed unless ollama passes checks
-          const parsed = extractJsonFromText(j.response ?? "") ?? parseKeyedLines(j.response ?? "") ?? j.response ?? "";
-          const candidate = coerceCopy(parsed, product);
-          const candidateEnforced = ensureHashtags(ensureProductInTagline(candidate, product), product, category);
-          if (!looksGeneric(candidateEnforced, product, category, keyBenefit)) {
-            copy = candidateEnforced;
-            providerUsed = "ollama";
-          }
-        }
-      } catch { /* ignore */ }
-    }
-
-    // 4) Return
+    // 5) Return
     return NextResponse.json(
       {
-        provider: providerUsed,
-        demo: providerUsed === "demo",
+        provider,
+        demo: provider === "demo",
         copy,
-        imageDataUrl: null,     // we’re using stock/pexels here
+        imageDataUrl: null,
         photoUrls,
         rawModelText,
-        note: providerUsed === "demo"
-          ? "LLM output looked generic; using deterministic product-aware copy instead."
-          : "LLM output passed quality checks.",
+        note: provider === "demo"
+          ? "Model output looked generic; using deterministic product-aware copy."
+          : "Model output passed relevance checks.",
       },
       { headers: { "Cache-Control": "no-store" } }
     );
