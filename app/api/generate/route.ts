@@ -25,7 +25,6 @@ type StrictCopy = Required<CopyShape>;
 
 type PexelsPhoto = { src?: { large2x?: string; large?: string; medium?: string } };
 type PexelsSearch = { photos?: PexelsPhoto[] };
-
 type GroqChatResponse = { choices?: { message?: { content?: string } }[] };
 
 const HAS_OPENAI = !!process.env.OPENAI_API_KEY;
@@ -34,11 +33,11 @@ const HAS_GROQ = !!process.env.GROQ_API_KEY;
 const PROVIDER = process.env.AI_PROVIDER || (HAS_OPENAI ? "openai" : "ollama");
 const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:1b";
-
 const PEXELS_KEY = process.env.PEXELS_API_KEY || "";
 const isVercel = process.env.VERCEL === "1";
 
-// ---------- helpers ----------
+/* ---------------- helpers ---------------- */
+
 const MOCK_COPY = (product: string): StrictCopy => ({
   tagline: `Meet ${product}`,
   caption: `Say hello to ${product}! Fresh look, easy choice.`,
@@ -64,34 +63,26 @@ const MOCK_SVG = (product: string) => {
         fill="#ffffff" opacity="0.95">${txt}</text>
 </svg>`;
 };
-
 function toDataUrlSvg(svg: string) {
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 }
 
-// Pull the first {...} JSON block from free-form text
+// Extract first JSON object from any text (handles code fences, extra chatter)
 function extractJsonFromText(text: string): unknown | null {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) return null;
-  try {
-    return JSON.parse(m[0]);
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(m[0]); } catch { return null; }
 }
 
-// Validate the Copy shape
 function isCopyShape(x: unknown): x is CopyShape {
   if (typeof x !== "object" || x === null) return false;
   const o = x as Record<string, unknown>;
   const okStr = (v: unknown) => v === undefined || typeof v === "string";
   const okArr =
     !("hashtags" in o) ||
-    (Array.isArray(o.hashtags) &&
-      (o.hashtags as unknown[]).every((t) => typeof t === "string"));
+    (Array.isArray(o.hashtags) && (o.hashtags as unknown[]).every((t) => typeof t === "string"));
   return okStr(o.tagline) && okStr(o.caption) && okStr(o.shortDescription) && okArr;
 }
-
 function normalizeCopy(input: unknown, product: string): StrictCopy {
   const fallback = MOCK_COPY(product);
   if (!isCopyShape(input)) return fallback;
@@ -106,12 +97,25 @@ function normalizeCopy(input: unknown, product: string): StrictCopy {
   };
 }
 
-function buildPhotoQuery(
-  product: string,
-  imageStyle?: string,
-  colorHint?: string,
-  imageQuery?: string
-) {
+function makeCopyPrompt(product: string, audience?: string, tone?: string, platform?: string) {
+  return `
+You are a marketing writer. Return ONLY valid JSON (no code fences, no markdown, no commentary).
+JSON schema:
+{
+  "tagline": string,         // <= 8 words, catchy
+  "caption": string,         // <= 140 chars
+  "shortDescription": string,// <= 3 sentences
+  "hashtags": string[]       // 5 short tags, no spaces inside tags
+}
+
+Product: ${product}
+Audience: ${audience || "general consumers"}
+Tone: ${tone || "friendly"}
+Platform: ${platform || "Instagram"}
+`.trim();
+}
+
+function buildPhotoQuery(product: string, imageStyle?: string, colorHint?: string, imageQuery?: string) {
   const q = imageQuery?.trim();
   if (q) return q;
   return [product, imageStyle, colorHint].filter(Boolean).join(" ").trim();
@@ -120,33 +124,21 @@ function buildPhotoQuery(
 async function getPexelsPhotoUrl(query: string): Promise<string | null> {
   if (!PEXELS_KEY) return null;
   try {
-    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(
-      query
-    )}&per_page=1&orientation=square`;
+    const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=1&orientation=square`;
     const res = await fetch(url, { headers: { Authorization: PEXELS_KEY } });
     if (!res.ok) return null;
     const j = (await res.json()) as PexelsSearch;
     const p = j.photos?.[0];
     return p?.src?.large2x || p?.src?.large || p?.src?.medium || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-// ---------- handler ----------
+/* ---------------- handler ---------------- */
+
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as GenReq;
-    const {
-      product,
-      audience,
-      tone,
-      platform,
-      imageStyle,
-      colorHint,
-      includeImage,
-      imageQuery,
-    } = body || {};
+    const { product, audience, tone, platform, imageStyle, colorHint, includeImage, imageQuery } = body || {};
     if (!product) return NextResponse.json({ error: "Missing product" }, { status: 400 });
 
     const photoQuery = buildPhotoQuery(product, imageStyle, colorHint, imageQuery);
@@ -155,36 +147,17 @@ export async function POST(req: Request) {
     if (HAS_OPENAI) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
       try {
-        const copyPrompt = `
-Return ONLY JSON with keys:
-- "tagline" (<=8 words)
-- "caption" (<=140 chars)
-- "shortDescription" (<=3 sentences)
-- "hashtags" (array of 5 short tags)
-
-Product: ${product}
-Audience: ${audience || "general consumers"}
-Tone: ${tone || "friendly"}
-Platform: ${platform || "Instagram"}
-`;
-
         const copyRes = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          temperature: 0.7,
+          temperature: 0.75,
           messages: [
-            { role: "system", content: "Return only valid JSON, no commentary." },
-            { role: "user", content: copyPrompt },
+            { role: "system", content: "Return only valid JSON, no markdown or code fences." },
+            { role: "user", content: makeCopyPrompt(product, audience, tone, platform) },
           ],
         });
 
         const raw = copyRes.choices?.[0]?.message?.content || "{}";
-        const parsed = (() => {
-          try {
-            return JSON.parse(raw);
-          } catch {
-            return null;
-          }
-        })();
+        const parsed = extractJsonFromText(raw);       // ✅ robust parse
         const copy = normalizeCopy(parsed, product);
 
         let imageDataUrl: string | null = null;
@@ -204,24 +177,12 @@ No words on the image; product-focused visuals; centered composition; soft shado
             });
             const b64 = img.data?.[0]?.b64_json;
             if (b64) imageDataUrl = `data:image/png;base64,${b64}`;
-          } catch {
-            // ignore; we'll use stock photo
-          }
+          } catch { /* ignore; fall back to stock photo */ }
         }
 
-        const photoUrl =
-          imageDataUrl || includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
-
-        return NextResponse.json({
-          provider: "openai",
-          demo: false,
-          copy,
-          imageDataUrl,
-          photoUrl,
-        });
-      } catch {
-        // fall through
-      }
+        const photoUrl = imageDataUrl || includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+        return NextResponse.json({ provider: "openai", demo: false, copy, imageDataUrl, photoUrl });
+      } catch { /* fall through */ }
     }
 
     // 1.5) Groq (cloud, free text) – image via stock photo
@@ -235,52 +196,24 @@ No words on the image; product-focused visuals; centered composition; soft shado
           },
           body: JSON.stringify({
             model: "llama3-8b-8192",
-            temperature: 0.7,
+            temperature: 0.75,
             messages: [
-              { role: "system", content: "Return only valid JSON, no commentary." },
-              {
-                role: "user",
-                content: `
-Return ONLY JSON with keys:
-- "tagline" (<=8 words)
-- "caption" (<=140 chars)
-- "shortDescription" (<=3 sentences)
-- "hashtags" (array of 5 short tags)
-
-Product: ${product}
-Audience: ${audience || "general consumers"}
-Tone: ${tone || "friendly"}
-Platform: ${platform || "Instagram"}
-`,
-              },
+              { role: "system", content: "Return only valid JSON, no markdown or code fences." },
+              { role: "user", content: makeCopyPrompt(product, audience, tone, platform) },
             ],
           }),
+          // avoid any weird caching
+          cache: "no-store",
         });
 
         const j = (await groqRes.json()) as GroqChatResponse;
         const raw = j.choices?.[0]?.message?.content || "{}";
-
-        let parsed: unknown = null;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {
-          parsed = null;
-        }
-
+        const parsed = extractJsonFromText(raw);       // ✅ robust parse
         const copy = normalizeCopy(parsed, product);
-        const photoUrl =
-          includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
 
-        return NextResponse.json({
-          provider: "groq",
-          demo: false,
-          copy,
-          imageDataUrl: null,
-          photoUrl,
-        });
-      } catch {
-        // continue
-      }
+        const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+        return NextResponse.json({ provider: "groq", demo: false, copy, imageDataUrl: null, photoUrl });
+      } catch { /* fall through */ }
     }
 
     // 2) Ollama (local dev only)
@@ -291,18 +224,7 @@ Platform: ${platform || "Instagram"}
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: OLLAMA_MODEL,
-            prompt: `
-Return ONLY JSON with keys:
-- "tagline" (<=8 words)
-- "caption" (<=140 chars)
-- "shortDescription" (<=3 sentences)
-- "hashtags" (array of 5 short tags)
-
-Product: ${product}
-Audience: ${audience || "general consumers"}
-Tone: ${tone || "friendly"}
-Platform: ${platform || "Instagram"}
-`,
+            prompt: makeCopyPrompt(product, audience, tone, platform),
             stream: false,
             options: { num_ctx: 512, num_predict: 256 },
           }),
@@ -311,50 +233,31 @@ Platform: ${platform || "Instagram"}
         if (!res.ok) {
           const svg = toDataUrlSvg(MOCK_SVG(product));
           return NextResponse.json({
-            provider: "ollama",
-            demo: true,
-            copy: MOCK_COPY(product),
-            imageDataUrl: svg,
-            photoUrl: null,
-            message:
-              "Ollama not ready or model too large. Try a tiny model (llama3.2:1b, phi3:mini).",
+            provider: "ollama", demo: true, copy: MOCK_COPY(product), imageDataUrl: svg, photoUrl: null,
+            message: "Ollama not ready or model too large. Try llama3.2:1b / phi3:mini.",
           });
         }
 
         const j = (await res.json()) as { response?: string };
-        const textRaw = j.response ?? "";
-        const parsed = extractJsonFromText(textRaw);
+        const parsed = extractJsonFromText(j.response ?? "");
         const copy = normalizeCopy(parsed, product);
-
-        const photoUrl =
-          includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
-
-        return NextResponse.json({
-          provider: "ollama",
-          demo: false,
-          copy,
-          imageDataUrl: null,
-          photoUrl,
-        });
-      } catch {
-        // fall through
-      }
+        const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+        return NextResponse.json({ provider: "ollama", demo: false, copy, imageDataUrl: null, photoUrl });
+      } catch { /* fall through */ }
     }
 
     // 3) Demo fallback
     const svg = toDataUrlSvg(MOCK_SVG(product));
-    const photoUrl =
-      includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
+    const photoUrl = includeImage === false ? null : await getPexelsPhotoUrl(photoQuery);
     return NextResponse.json({
       provider: "demo",
       demo: true,
       copy: MOCK_COPY(product),
       imageDataUrl: svg,
       photoUrl,
-      message:
-        isVercel
-          ? "No cloud key configured and Ollama is not reachable in production. Serving demo output."
-          : "AI not available. Serving demo output.",
+      message: isVercel
+        ? "No cloud key configured and Ollama is not reachable in production. Serving demo output."
+        : "AI not available. Serving demo output.",
     });
   } catch {
     return NextResponse.json({ error: "Server error" }, { status: 500 });
