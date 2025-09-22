@@ -4,7 +4,7 @@ import Image from "next/image";
 import { useMemo, useState, useEffect } from "react";
 
 type GenResult = {
-  provider?: "openai" | "ollama" | "demo";
+  provider?: "openai" | "groq" | "ollama" | "demo";
   demo?: boolean;
   copy?: {
     tagline?: string;
@@ -91,7 +91,7 @@ export default function Home() {
     alert("Copied!");
   }
 
-  // Build an image source cascade: OpenAI PNG → Pexels → Unsplash → LoremFlickr → Picsum → SVG
+  // Image cascade: OpenAI PNG → Pexels → Unsplash → LoremFlickr → Picsum → SVG
   const fallbacks = useMemo(() => {
     const topic = encodeURIComponent(product || "product");
     const tags = encodeURIComponent((product || "product").replace(/\s+/g, ","));
@@ -109,7 +109,8 @@ export default function Home() {
   useEffect(() => setImgIndex(0), [fallbacks.length, product, result?.provider]);
 
   const posterSrc = fallbacks[imgIndex] || placeholderSvgDataUrl(product);
-  const handleImgError = () => setImgIndex((i) => Math.min(i + 1, fallbacks.length - 1));
+  const handleImgError = () =>
+    setImgIndex((i) => Math.min(i + 1, fallbacks.length - 1));
 
   return (
     <main className="min-h-screen p-6 flex flex-col items-center bg-gray-50 text-gray-900">
@@ -202,7 +203,10 @@ export default function Home() {
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
                   <strong>Tagline</strong>
-                  <button className="text-sm underline" onClick={() => copyToClipboard(result.copy?.tagline || "")}>
+                  <button
+                    className="text-sm underline"
+                    onClick={() => copyToClipboard(result.copy?.tagline || "")}
+                  >
                     Copy
                   </button>
                 </div>
@@ -210,7 +214,10 @@ export default function Home() {
 
                 <div className="flex justify-between items-center">
                   <strong>Caption</strong>
-                  <button className="text-sm underline" onClick={() => copyToClipboard(result.copy?.caption || "")}>
+                  <button
+                    className="text-sm underline"
+                    onClick={() => copyToClipboard(result.copy?.caption || "")}
+                  >
                     Copy
                   </button>
                 </div>
@@ -231,7 +238,9 @@ export default function Home() {
                   <strong>Hashtags</strong>
                   <button
                     className="text-sm underline"
-                    onClick={() => copyToClipboard((result.copy?.hashtags || []).join(" "))}
+                    onClick={() =>
+                      copyToClipboard((result.copy?.hashtags || []).join(" "))
+                    }
                   >
                     Copy
                   </button>
@@ -262,7 +271,9 @@ export default function Home() {
           </section>
         )}
 
-        <footer className="text-xs text-gray-500 pt-4">© {new Date().getFullYear()} Veronica Foltz </footer>
+        <footer className="text-xs text-gray-500 pt-4">
+          © {new Date().getFullYear()} Veronica Foltz
+        </footer>
       </div>
     </main>
   );
