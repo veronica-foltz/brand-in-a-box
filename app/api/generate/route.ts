@@ -125,7 +125,6 @@ function composeCopy(
   const catPhrase = pick(catBits[normCat], seed, 6);
   const benefit = (keyBenefit && keyBenefit.trim()) || pick(catBits[normCat], seed, 7);
 
-  // 9 templates → much more variety; seeded pick
   const templates = [
     { tl: clampWords(`${pShort}: ${t1} ${benefit}`, 8),
       cp: clampWords(`${v} ${pShort} — ${t2} ${benefit}, ${c1}.`, 26),
@@ -173,7 +172,6 @@ function composeCopy(
     hashtags: Array.from(tags).slice(0, 5),
   };
 
-  // Make absolutely sure the product is mentioned in tagline & caption
   const pLower = product.toLowerCase();
   if (!copy.tagline.toLowerCase().includes(pLower)) {
     copy.tagline = `${clampWords(product, 3)}: ${copy.tagline}`;
@@ -276,7 +274,7 @@ export async function POST(req: Request) {
         copy,
         imageDataUrl: null,
         photoUrls,
-        debug, // visible so you can confirm changes per product
+        debug, 
         note: "Local deterministic copy (LLM disabled).",
       },
       { headers: { "Cache-Control": "no-store" } }

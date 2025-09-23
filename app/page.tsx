@@ -12,8 +12,8 @@ type GenResult = {
     shortDescription?: string;
     hashtags?: string[];
   };
-  imageDataUrl?: string | null; // PNG data URL (OpenAI)
-  photoUrls?: string[];         // NEW: multiple Pexels candidates
+  imageDataUrl?: string | null; 
+  photoUrls?: string[];        
   message?: string;
   error?: string;
   rawModelText?: string;        // debug
@@ -116,14 +116,13 @@ export default function Home() {
     if (selectedImage) candidates.push(selectedImage);
     if (result?.imageDataUrl) candidates.push(result.imageDataUrl);
     if (result?.photoUrls && result.photoUrls.length) candidates.push(...result.photoUrls);
-    // Final fallbacks:
+    
     candidates.push(
       `https://source.unsplash.com/1024x1024/?${topic}`,
       `https://picsum.photos/seed/${topic}/1024/1024`,
       base
     );
 
-    // Dedup
     return Array.from(new Set(candidates));
   }, [result, product, selectedImage]);
 
@@ -222,8 +221,7 @@ export default function Home() {
 
           {needKeywordsHint && (
             <p className="text-sm text-amber-700 bg-amber-100 border border-amber-200 p-2 rounded">
-              Tip: add a few image keywords so results match your product (e.g., “granola bar, oats, wrapper”).
-              You can also set a free <strong>PEXELS_API_KEY</strong> later for better images.
+              Tip: add a few image keywords so results match your product (e.g., “granola bar, oats, wrapper”)
             </p>
           )}
 
