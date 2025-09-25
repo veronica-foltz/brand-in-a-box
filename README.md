@@ -10,4 +10,4 @@ Features
 - Safe fallbacks (Demo Mode) so the app always works
 
 Stack
-Next.js • TypeScript • TailwindCSS
+- Next.js • TypeScript • TailwindCSS
