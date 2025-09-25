@@ -1,6 +1,6 @@
 📦 Brand-in-a-Box
 
-Live Demo: brand-in-a-box.vercel.app/ 
+Live Demo: https://brand-in-a-box.vercel.app/ 
 
 Generate marketing copy (AI) + a poster image from a short product brief.
 
