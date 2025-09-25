@@ -137,7 +137,7 @@ export default function Home() {
     <main className="min-h-screen p-6 flex flex-col items-center bg-gray-50 text-gray-900">
       <div className="w-full max-w-3xl space-y-4">
         <h1 className="text-3xl font-bold">Brand-in-a-Box</h1>
-        <p className="text-gray-900">Type your product, choose a category & get tailored advertisment copy + a poster.</p>
+        <p className="text-gray-900">Type your product, choose a category & get tailored advertising copy + a poster.</p>
 
         <form onSubmit={handleGenerate} className="grid gap-3 bg-white p-4 rounded-xl shadow">
           <input
