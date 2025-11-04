@@ -2,7 +2,7 @@
 
 Live Demo: https://brand-in-a-box.vercel.app/ 
 
-Generate marketing copy (AI) + a poster image from a short product brief.
+Generate marketing copy (AI) + a poster image from a short product brief
 
 Features
 - Local AI copy via Ollama or OpenAI (if key provided)
