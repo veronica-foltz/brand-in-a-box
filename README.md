@@ -9,5 +9,5 @@ Generate marketing copy (AI) + a poster image from a short product brief
 - Image: OpenAI PNG → Unsplash → LoremFlickr → Picsum → SVG fallback
 - Safe fallbacks (Demo Mode) so the app always works
 
-Stack
+**Stack**
 - Next.js • TypeScript • TailwindCSS
