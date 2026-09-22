@@ -1,4 +1,4 @@
-📦 Brand-in-a-Box
+**📦 Brand-in-a-Box**
 
 Live Demo: https://brand-in-a-box.vercel.app/ 
 
